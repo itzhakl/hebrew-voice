@@ -1,0 +1,311 @@
+'use strict';
+
+const { spawn } = require('child_process');
+const config = require('./config');
+const { Endpointer } = require('./vad');
+const { ChirpProvider, parseGoogleCredential } = require('./chirp');
+const { HybridProvider } = require('./hybrid');
+const server = require('./server');
+
+const ENV_VAR = 'VOICE_STREAM_BASE_URL';
+
+const USAGE = `rtl-caret voice - Hebrew dictation for Claude Code's terminal /voice
+
+  rtl-caret voice -- <command...>   run a command with dictation redirected here
+  rtl-caret voice serve             run the server in the foreground
+  rtl-caret voice status            report whether a server is reachable
+  rtl-caret voice env               print the export line for an existing server
+  rtl-caret voice setup             store the Google Cloud credential
+  rtl-caret voice test [seconds]    record from the microphone and transcribe
+
+  --port <n>       port to bind or probe (default 8765)
+  --lang <code>    BCP-47 language, "iw-IL" for Hebrew
+  --provider <p>   chirp (one engine) or hybrid (live interims + accurate final)
+  --project <id>   Google Cloud project id
+  --verbose        log every protocol step
+
+Configuration lives in ${config.configPath()}.
+`;
+
+function baseUrl(port) {
+  return `ws://127.0.0.1:${port}`;
+}
+
+function parse(argv) {
+  const opts = { sub: null, command: [], verbose: false, overrides: {} };
+  const sep = argv.indexOf('--');
+  const head = sep === -1 ? argv : argv.slice(0, sep);
+  if (sep !== -1) opts.command = argv.slice(sep + 1);
+  for (let i = 0; i < head.length; i++) {
+    const a = head[i];
+    if (a === '--port') opts.overrides.port = Number(head[++i]);
+    else if (a === '--lang') opts.overrides.language = head[++i];
+    else if (a === '--provider') opts.overrides.provider = head[++i];
+    else if (a === '--project') opts.overrides.projectId = head[++i];
+    else if (a === '--verbose') opts.verbose = true;
+    else if (!opts.sub) opts.sub = a;
+    else opts.args = (opts.args || []).concat(a);
+  }
+  return opts;
+}
+
+function buildProvider(cfg) {
+  // Fail fast on a malformed credential instead of erroring on the first mic
+  // press, when the failure is invisible behind Claude's UI.
+  parseGoogleCredential(cfg.credential, cfg.projectId || undefined, cfg.location);
+  const fast = new ChirpProvider({
+    credential: cfg.credential,
+    projectId: cfg.projectId || undefined,
+    location: cfg.location,
+    model: cfg.model,
+    languageCode: cfg.language
+  });
+  if (cfg.provider === 'chirp') return fast;
+  const accurate = new ChirpProvider({
+    credential: cfg.credential,
+    projectId: cfg.projectId || undefined,
+    location: cfg.hybridFinalLocation,
+    model: cfg.hybridFinalModel,
+    languageCode: cfg.language
+  });
+  return new HybridProvider(fast, accurate);
+}
+
+function serverOptions(cfg, verbose) {
+  return {
+    port: cfg.port,
+    provider: buildProvider(cfg),
+    makeEndpointer: () =>
+      new Endpointer({
+        vadThreshold: cfg.vadThreshold,
+        endpointMs: cfg.endpointMs,
+        maxSegmentMs: cfg.maxSegmentMs
+      }),
+    log: verbose ? (m) => console.error(`[voice] ${m}`) : undefined
+  };
+}
+
+/** First port in the scan range answering our own /healthz. */
+async function findRunning(port, attempts = 10) {
+  for (let i = 0; i < attempts; i++) {
+    if (await server.isOurServer(port + i)) return port + i;
+  }
+  return null;
+}
+
+async function cmdServe(cfg, verbose) {
+  const { server: instance, port, adopted } = await server.startWithPortFallback(serverOptions(cfg, verbose));
+  if (adopted) {
+    console.error(`another rtl-caret voice server already owns ${baseUrl(port)}`);
+    return 0;
+  }
+  console.error(`rtl-caret voice on ${baseUrl(port)}  (${cfg.provider}/${cfg.model} ${cfg.language})`);
+  console.error(`export ${ENV_VAR}=${baseUrl(port)}`);
+  await new Promise((resolve) => {
+    const stop = () => {
+      instance.close().then(resolve, resolve);
+    };
+    process.on('SIGINT', stop);
+    process.on('SIGTERM', stop);
+  });
+  return 0;
+}
+
+async function cmdRun(cfg, verbose, command) {
+  if (!cfg.enabled) {
+    console.error('voice is disabled in voice.json - running the command unchanged');
+    return exec(command, {});
+  }
+  const { server: instance, port, adopted } = await server.startWithPortFallback(serverOptions(cfg, verbose));
+  if (verbose) console.error(`[voice] ${adopted ? 'adopted' : 'listening on'} ${baseUrl(port)}`);
+  const code = await exec(command, { [ENV_VAR]: baseUrl(port) });
+  if (instance) await instance.close();
+  return code;
+}
+
+function exec(command, extraEnv) {
+  return new Promise((resolve) => {
+    const child = spawn(command[0], command.slice(1), {
+      stdio: 'inherit',
+      env: Object.assign({}, process.env, extraEnv)
+    });
+    // The wrapped program owns the terminal: forward the signals the user aims
+    // at it and let its own exit end us, rather than dying first and orphaning it.
+    const forward = (sig) => child.kill(sig);
+    process.on('SIGINT', forward);
+    process.on('SIGTERM', forward);
+    child.on('error', (e) => {
+      console.error(`cannot run ${command[0]}: ${e.message}`);
+      resolve(127);
+    });
+    child.on('exit', (code, signal) => resolve(signal ? 128 : code == null ? 0 : code));
+  });
+}
+
+async function cmdStatus(cfg) {
+  const port = await findRunning(cfg.port);
+  if (port === null) {
+    console.log(`no server on ${cfg.port}..${cfg.port + 9}`);
+    console.log(`config     ${config.configPath()}`);
+    console.log(`credential ${cfg.credential ? 'set' : 'MISSING - run: rtl-caret voice setup'}`);
+    return 1;
+  }
+  console.log(`running    ${baseUrl(port)}`);
+  console.log(`provider   ${cfg.provider} (${cfg.model} @ ${cfg.location}, ${cfg.language})`);
+  console.log(`export     ${ENV_VAR}=${baseUrl(port)}`);
+  return 0;
+}
+
+async function cmdEnv(cfg) {
+  const port = await findRunning(cfg.port);
+  if (port === null) {
+    console.error('no rtl-caret voice server running - start one with: rtl-caret voice serve');
+    return 1;
+  }
+  console.log(`export ${ENV_VAR}=${baseUrl(port)}`);
+  return 0;
+}
+
+function readStdin() {
+  return new Promise((resolve) => {
+    let data = '';
+    process.stdin.setEncoding('utf8');
+    process.stdin.on('data', (c) => (data += c));
+    process.stdin.on('end', () => resolve(data.trim()));
+  });
+}
+
+async function cmdSetup(overrides) {
+  console.error('Paste a Google Cloud API key or the whole service-account JSON, then Ctrl-D:');
+  const credential = await readStdin();
+  if (!credential) {
+    console.error('nothing read - aborted');
+    return 1;
+  }
+  const patch = { credential };
+  if (overrides.projectId) patch.projectId = overrides.projectId;
+  if (overrides.language) patch.language = overrides.language;
+  if (overrides.provider) patch.provider = overrides.provider;
+  if (overrides.port) patch.port = overrides.port;
+  const cfg = config.load(patch);
+  // Reject the credential now, at the one moment the user is looking at it.
+  parseGoogleCredential(cfg.credential, cfg.projectId || undefined, cfg.location);
+  const file = config.save(patch);
+  console.error(`saved to ${file} (mode 0600)`);
+  return 0;
+}
+
+const RECORDERS = [
+  ['arecord', ['-q', '-f', 'S16_LE', '-r', '16000', '-c', '1', '-t', 'raw', '-d', null]],
+  ['sox', ['-q', '-d', '-t', 'raw', '-b', '16', '-e', 'signed-integer', '-r', '16000', '-c', '1', '-', 'trim', '0', null]]
+];
+
+/* Records from the microphone and drives the real socket, so a green result
+ * proves the whole chain - protocol, provider, credential - not just the API. */
+async function cmdTest(cfg, verbose, seconds) {
+  const secs = Number(seconds) > 0 ? Number(seconds) : 5;
+  const { server: instance, port } = await server.startWithPortFallback(serverOptions(cfg, verbose));
+  const WebSocket = require('ws');
+  const ws = new WebSocket(`${baseUrl(port)}${server.VOICE_STREAM_PATH}`);
+  const transcripts = [];
+  let recorder = null;
+
+  const finished = new Promise((resolve) => {
+    ws.on('message', (data) => {
+      let msg;
+      try {
+        msg = JSON.parse(data.toString());
+      } catch (e) {
+        return;
+      }
+      if (msg.type === 'TranscriptText') transcripts.push(msg.data);
+      else if (msg.type === 'TranscriptError') console.error(`error: ${msg.description}`);
+    });
+    ws.on('close', resolve);
+    ws.on('error', (e) => {
+      console.error(`socket: ${e.message}`);
+      resolve();
+    });
+  });
+
+  await new Promise((resolve, reject) => {
+    ws.on('open', resolve);
+    ws.on('error', reject);
+  });
+
+  for (const [bin, template] of RECORDERS) {
+    const args = template.map((a) => (a === null ? String(secs) : a));
+    const child = spawn(bin, args, { stdio: ['ignore', 'pipe', 'ignore'] });
+    const started = await new Promise((resolve) => {
+      child.on('error', () => resolve(false));
+      child.stdout.once('data', (chunk) => {
+        ws.send(chunk, { binary: true });
+        resolve(true);
+      });
+      // No audio at all within a second means this recorder is not working.
+      setTimeout(() => resolve(child.exitCode === null), 1000);
+    });
+    if (started) {
+      recorder = child;
+      break;
+    }
+  }
+  if (!recorder) {
+    console.error('no working recorder found (tried arecord, sox) - install one to use "voice test"');
+    ws.close();
+    if (instance) await instance.close();
+    return 1;
+  }
+
+  console.error(`recording ${secs}s - speak now`);
+  recorder.stdout.on('data', (chunk) => ws.send(chunk, { binary: true }));
+  await new Promise((resolve) => recorder.on('exit', resolve));
+  ws.send(JSON.stringify({ type: 'CloseStream' }));
+  await finished;
+  if (instance) await instance.close();
+
+  const text = transcripts.join(' ').trim();
+  if (!text) {
+    console.error('no transcript came back');
+    return 1;
+  }
+  console.log(text);
+  return 0;
+}
+
+async function run(argv) {
+  const opts = parse(argv);
+  if (opts.sub === 'help' || opts.sub === '--help' || opts.sub === '-h') {
+    process.stdout.write(USAGE);
+    return 0;
+  }
+  if (opts.sub === 'setup') return cmdSetup(opts.overrides);
+
+  let cfg;
+  try {
+    cfg = config.load(opts.overrides);
+  } catch (e) {
+    console.error(e.message);
+    return 1;
+  }
+
+  try {
+    if (opts.command.length) return await cmdRun(cfg, opts.verbose, opts.command);
+    if (opts.sub === 'serve') return await cmdServe(cfg, opts.verbose);
+    if (opts.sub === 'status' || !opts.sub) return await cmdStatus(cfg);
+    if (opts.sub === 'env') return await cmdEnv(cfg);
+    if (opts.sub === 'test') return await cmdTest(cfg, opts.verbose, (opts.args || [])[0]);
+  } catch (e) {
+    console.error(e.message || String(e));
+    if (e.hint === 'set-api-key' && !e.message.includes('voice setup')) {
+      console.error('run: rtl-caret voice setup');
+    }
+    return 1;
+  }
+
+  console.error(`unknown voice command: ${opts.sub}`);
+  process.stdout.write(USAGE);
+  return 1;
+}
+
+module.exports = { run, parse, buildProvider, USAGE, ENV_VAR };
