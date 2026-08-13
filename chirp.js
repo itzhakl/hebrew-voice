@@ -118,7 +118,10 @@ class ChirpProvider {
 
   async createSession(cb) {
     const settleMs = this.opts.settleMs == null ? 250 : this.opts.settleMs;
-    const settleTimeoutMs = this.opts.settleTimeoutMs == null ? 1500 : this.opts.settleTimeoutMs;
+    // The server keeps the socket talking after CloseStream, which lifts the
+    // client's window from 1500 ms to 5000 ms - so waiting out a dangling
+    // interim here is affordable where it used to risk the whole transcript.
+    const settleTimeoutMs = this.opts.settleTimeoutMs == null ? 3000 : this.opts.settleTimeoutMs;
     const { projectId } = parseGoogleCredential(this.opts.credential, this.opts.projectId, this.opts.location);
     const recognizer = `projects/${projectId}/locations/${this.opts.location}/recognizers/_`;
 

@@ -25,12 +25,18 @@ function stripBidiControls(text) {
   return text.replace(BIDI_CONTROLS_RE, '');
 }
 
-/* Claude's client waits at most 3000 ms for the socket to close after
- * CloseStream before its own fallback timer fires and the mic UI hangs
- * visibly. Provider endSegment timeouts are tuned to fit under that, but a VAD
- * commit already queued ahead of the close-stream commit stacks its wait on
- * top. This deadline is the hard backstop. */
-const CLOSE_STREAM_DEADLINE_MS = 2500;
+/* Read out of the CLI's own finalize(): after it sends CloseStream it arms two
+ * timers - a 1500 ms "no data" timer and a 5000 ms safety timer. ANY
+ * TranscriptText/TranscriptInterim frame that arrives after CloseStream clears
+ * the first one; a TranscriptEndpoint resolves finalize immediately. Whichever
+ * fires, the client promotes the last interim it holds and stops listening.
+ *
+ * So the budget is 1500 ms if we go quiet, and 5000 ms if we keep the socket
+ * talking - which is why CloseStream is answered instantly with a keepalive
+ * interim below, before the engine's real final is waited for. */
+const NO_DATA_MS = 1500;
+const SAFETY_MS = 5000;
+const CLOSE_STREAM_DEADLINE_MS = 4500;
 
 function handleConnection(ws, opts) {
   const log = opts.log || (() => {});
@@ -46,22 +52,51 @@ function handleConnection(ws, opts) {
   };
 
   log('connection open (mic start) - creating provider session');
+  const openedAt = Date.now();
   let session;
+  // Opening a session costs an OAuth exchange and a gRPC channel on the first
+  // mic press. The CLI starts sending audio the moment the socket is up, so
+  // frames that arrive inside that window are held here and replayed - dropping
+  // them silently eats the first words of the utterance.
+  const preroll = [];
+  let prerollDropped = 0;
+
+  // The last interim we showed the user and have not superseded with a final.
+  // Claude paints interims grey and discards them when the mic stops, so an
+  // utterance whose final never lands would vanish in front of the user.
+  let unfinalised = '';
+
+  const emit = (text, why) => {
+    const clean = stripBidiControls(text);
+    if (!clean) return;
+    log(`${why}: ${clean.length} chars`);
+    send({ type: 'TranscriptText', data: clean });
+    send({ type: 'TranscriptEndpoint' });
+    unfinalised = '';
+  };
+
   const ready = opts.provider
     .createSession({
-      onInterim: (text) => send({ type: 'TranscriptText', data: stripBidiControls(text) }),
+      // TranscriptInterim and TranscriptText are handled identically by the
+      // client - both only replace its pending buffer - but naming the grey
+      // hypothesis correctly is free and survives the two diverging.
+      onInterim: (text) => {
+        unfinalised = text;
+        send({ type: 'TranscriptInterim', data: stripBidiControls(text) });
+      },
       onError: reportError,
       // Providers with server-side endpointing push each finalized utterance
       // here the moment it lands - commit latency is the ASR's own endpointer.
       onFinal: (text) => {
-        if (!text) return;
-        log(`final (server-endpointed): ${text.length} chars`);
-        send({ type: 'TranscriptText', data: stripBidiControls(text) });
-        send({ type: 'TranscriptEndpoint' });
+        if (text) emit(text, 'final (server-endpointed)');
       }
     })
     .then((s) => {
       session = s;
+      log(`session ready ${Date.now() - openedAt}ms after mic start, ${preroll.length} frames buffered`);
+      for (const buf of preroll) s.sendAudio(buf);
+      preroll.length = 0;
+      if (prerollDropped) log(`WARNING: ${prerollDropped} frames dropped before the session opened`);
     })
     .catch((e) => {
       reportError({ message: e && e.message ? e.message : String(e) });
@@ -76,11 +111,11 @@ function handleConnection(ws, opts) {
         if (!session) return;
         const text = await session.endSegment();
         log(`commit (${reason}): ${text.length} chars`);
-        if (text) {
-          // Committed DURING recording - Claude ignores transcripts after stop.
-          send({ type: 'TranscriptText', data: stripBidiControls(text) });
-          send({ type: 'TranscriptEndpoint' });
-        }
+        // Committed DURING recording - Claude ignores transcripts after stop.
+        if (text) emit(text, `commit (${reason})`);
+        // The engine owed us a final and the deadline is the socket closing:
+        // send back what the user already read rather than nothing at all.
+        else if (reason === 'close-stream' && unfinalised) emit(unfinalised, 'commit (interim fallback)');
       })
       .catch((e) => log(`commit failed: ${e}`));
   };
@@ -90,6 +125,10 @@ function handleConnection(ws, opts) {
       const buf = Buffer.isBuffer(data) ? data : Buffer.concat(data);
       try {
         if (session) session.sendAudio(buf);
+        // ~10 s of 20 ms frames. A session that has not opened by then is not
+        // going to, and the memory is not worth holding.
+        else if (preroll.length < 500) preroll.push(buf);
+        else prerollDropped++;
         const pcm = new Int16Array(buf.byteLength >> 1);
         for (let i = 0; i < pcm.length; i++) pcm[i] = buf.readInt16LE(i * 2);
         const result = endpointer.pushFrame(pcm);
@@ -111,6 +150,13 @@ function handleConnection(ws, opts) {
     if (ctrl.type === 'CloseStream') {
       const closeStreamAt = Date.now();
       log('CloseStream received');
+      // Answer before doing any work: this frame alone cancels the client's
+      // 1500 ms no-data timer and buys the full 5000 ms, which is the
+      // difference between committing the accurate engine's transcript and
+      // losing it to the fast engine's guess. Empty data is deliberate when
+      // there is nothing yet - the client clears the timer before it looks at
+      // the payload, and an empty payload cannot clobber what it holds.
+      send({ type: 'TranscriptInterim', data: stripBidiControls(unfinalised) });
       // Mic stopped - no more audio. Let the provider force-finalize buffered
       // speech instead of waiting out server-side endpointing.
       void ready.then(() => {
@@ -228,5 +274,7 @@ module.exports = {
   stripBidiControls,
   HEALTH_APP,
   VOICE_STREAM_PATH,
-  CLOSE_STREAM_DEADLINE_MS
+  CLOSE_STREAM_DEADLINE_MS,
+  NO_DATA_MS,
+  SAFETY_MS
 };

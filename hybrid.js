@@ -22,13 +22,17 @@ class HybridProvider {
   }
 
   async createSession(cb) {
-    // Must stay inside the client's 3000 ms CloseStream grace window.
-    const finalWaitMs = this.opts.finalWaitMs == null ? 2300 : this.opts.finalWaitMs;
+    // The server answers CloseStream with a keepalive interim, which lifts the
+    // client's window from 1500 ms to 5000 ms. chirp_3 lands its flush-final
+    // 1.4-2.0 s after the stop, so waiting this long is what makes the accurate
+    // transcript - not the fast engine's guess - the one that gets committed.
+    const finalWaitMs = this.opts.finalWaitMs == null ? 4000 : this.opts.finalWaitMs;
     let fastCommitted = '';
     let fastInterim = '';
     const fastText = () => `${fastCommitted} ${fastInterim}`.trim();
     let accurateFinals = [];
     let accurateDone = false;
+    let accurateDiedEarly = false;
     let flushed = false;
 
     const [fastSession, accurateSession] = await Promise.all([
@@ -48,13 +52,19 @@ class HybridProvider {
       this.accurate.createSession({
         onInterim: () => {},
         onFinal: (t) => accurateFinals.push(t),
+        // An engine that ends or errors while the user is still talking has
+        // only heard part of the utterance. Its transcript is more accurate
+        // per word and yet missing words, so the fast engine - which heard all
+        // of it - has to win, or the tail of the sentence disappears.
         onClosed: () => {
           accurateDone = true;
+          if (!flushed) accurateDiedEarly = true;
         },
         // The accurate engine failing must not kill dictation - the fast
         // transcript is the fallback, so swallow and stop waiting.
         onError: () => {
           accurateDone = true;
+          if (!flushed) accurateDiedEarly = true;
         }
       })
     ]);
@@ -74,11 +84,12 @@ class HybridProvider {
         if (!flushed) return '';
         const started = Date.now();
         while (!accurateDone && Date.now() - started < finalWaitMs) await sleep(25);
-        const accurate = accurateFinals.join(' ').trim();
+        const accurate = accurateDiedEarly ? '' : accurateFinals.join(' ').trim();
         const text = accurate || fastText();
         fastCommitted = '';
         fastInterim = '';
         accurateFinals = [];
+        accurateDiedEarly = false;
         flushed = false;
         return text;
       },
