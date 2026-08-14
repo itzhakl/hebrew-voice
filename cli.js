@@ -93,6 +93,16 @@ async function findRunning(port, attempts = 10) {
   return null;
 }
 
+/** Everything answering the voice_stream health probe in the scan range. */
+async function scan(port, attempts = 10) {
+  const found = [];
+  for (let i = 0; i < attempts; i++) {
+    const result = await server.probe(port + i);
+    if (result.kind !== 'none') found.push(result);
+  }
+  return found;
+}
+
 async function cmdServe(cfg, verbose) {
   const { server: instance, port, adopted } = await server.startWithPortFallback(serverOptions(cfg, verbose));
   if (adopted) {
@@ -143,17 +153,28 @@ function exec(command, extraEnv) {
 }
 
 async function cmdStatus(cfg) {
-  const port = await findRunning(cfg.port);
-  if (port === null) {
-    console.log(`no server on ${cfg.port}..${cfg.port + 9}`);
-    console.log(`config     ${config.configPath()}`);
-    console.log(`credential ${cfg.credential ? 'set' : 'MISSING - run: rtl-caret voice setup'}`);
+  const found = await scan(cfg.port);
+  const ours = found.find((f) => f.kind === 'ours');
+
+  console.log(`config     ${config.configPath()}`);
+  console.log(`credential ${cfg.credential ? 'set' : 'MISSING - run: rtl-caret voice setup'}`);
+  console.log(`provider   ${cfg.provider} (${cfg.model} @ ${cfg.location}, ${cfg.language})`);
+  if (process.env[ENV_VAR]) console.log(`${ENV_VAR.padEnd(10)} ${process.env[ENV_VAR]} (already in this shell)`);
+
+  if (!found.length) {
+    console.log(`server     none on ${cfg.port}..${cfg.port + 9}`);
+    console.log('           dictation runs for as long as "rtl-caret voice -- <command>" does');
     return 1;
   }
-  console.log(`running    ${baseUrl(port)}`);
-  console.log(`provider   ${cfg.provider} (${cfg.model} @ ${cfg.location}, ${cfg.language})`);
-  console.log(`export     ${ENV_VAR}=${baseUrl(port)}`);
-  return 0;
+  for (const f of found) {
+    // A foreign voice_stream server is almost always the VS Code extension,
+    // which serves the same CLI just as well - saying "no server" here sends
+    // you hunting for a dead socket that is alive and working.
+    const who = f.kind === 'ours' ? 'ours' : `another app (${f.health.app})`;
+    console.log(`server     ${baseUrl(f.port)}  ${who}, provider ${f.health.provider}, pid ${f.health.pid}`);
+  }
+  if (ours) console.log(`export     ${ENV_VAR}=${baseUrl(ours.port)}`);
+  return ours ? 0 : 1;
 }
 
 async function cmdEnv(cfg) {

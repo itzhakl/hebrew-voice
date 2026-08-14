@@ -230,25 +230,36 @@ class VoiceStreamServer {
   }
 }
 
-function isOurServer(port, timeoutMs = 800) {
+/* What is answering /healthz on this port: our own server, someone else's
+ * voice_stream server (the VS Code extension runs one), or nothing. Reporting
+ * "no server" for a port a foreign voice_stream owns sends you hunting for a
+ * dead socket that is in fact alive and serving the CLI. */
+function probe(port, timeoutMs = 800) {
   return new Promise((resolve) => {
     const req = http.get({ host: '127.0.0.1', port, path: '/healthz', timeout: timeoutMs }, (res) => {
       let body = '';
       res.on('data', (c) => (body += c));
       res.on('end', () => {
         try {
-          resolve(JSON.parse(body).app === HEALTH_APP);
+          const health = JSON.parse(body);
+          if (health.app === HEALTH_APP) resolve({ kind: 'ours', port, health });
+          else if (health.protocol === 'voice_stream') resolve({ kind: 'foreign', port, health });
+          else resolve({ kind: 'none', port });
         } catch (e) {
-          resolve(false);
+          resolve({ kind: 'none', port });
         }
       });
     });
     req.on('timeout', () => {
       req.destroy();
-      resolve(false);
+      resolve({ kind: 'none', port });
     });
-    req.on('error', () => resolve(false));
+    req.on('error', () => resolve({ kind: 'none', port }));
   });
+}
+
+async function isOurServer(port, timeoutMs = 800) {
+  return (await probe(port, timeoutMs)).kind === 'ours';
 }
 
 /* Bind opts.port, or adopt a healthy instance of our own server already on it
@@ -271,6 +282,7 @@ module.exports = {
   VoiceStreamServer,
   startWithPortFallback,
   isOurServer,
+  probe,
   stripBidiControls,
   HEALTH_APP,
   VOICE_STREAM_PATH,
