@@ -17,6 +17,11 @@ const REALTIME_PATH = '/v1/speech-to-text/realtime';
 const DEFAULT_MODEL = 'scribe_v2_realtime';
 const SAMPLE_RATE = 16000;
 
+/* Server-side limits on the keyterm list. Going over earns an invalid_request
+ * at mic time, where the failure is invisible behind Claude's UI. */
+const MAX_KEYTERMS = 50;
+const MAX_KEYTERM_LENGTH = 20;
+
 /* One JSON+base64 frame per 20 ms of audio is 50 messages a second for no
  * gain. Batching to ~100 ms costs latency the model cannot use anyway. */
 const DEFAULT_CHUNK_MS = 100;
@@ -89,6 +94,21 @@ function parseElevenLabsCredential(raw) {
   return trimmed;
 }
 
+function toList(value) {
+  if (value == null) return [];
+  const raw = Array.isArray(value) ? value : String(value).split(',');
+  return raw.map((v) => String(v).trim()).filter(Boolean);
+}
+
+/* Keyterms bias the model towards words it would otherwise mishear - product
+ * names, commands, Hebrew spellings of English terms. Over-long ones are
+ * dropped rather than truncated: half a term is a different word. */
+function keytermList(value) {
+  return toList(value)
+    .filter((term) => term.length <= MAX_KEYTERM_LENGTH)
+    .slice(0, MAX_KEYTERMS);
+}
+
 function buildRealtimeUrl(opts = {}) {
   const params = new URLSearchParams({
     model_id: opts.model || DEFAULT_MODEL,
@@ -99,6 +119,20 @@ function buildRealtimeUrl(opts = {}) {
   });
   const language = normalizeLanguage(opts.languageCode);
   if (language) params.set('language_code', language);
+  // Both lists are repeated parameters, never comma-joined. A comma-joined
+  // secondary_languages is rejected outright ("Invalid language code received:
+  // 'en,ar'"), and comma-joined keyterms are accepted as ONE long term - which
+  // biases the model at a string nobody will ever say. Verified against the
+  // live API, which echoes its resolved config back in session_started.
+  for (const code of toList(opts.secondaryLanguages)) {
+    const bare = normalizeLanguage(code);
+    if (bare && bare !== language) params.append('secondary_languages', bare);
+  }
+  for (const term of keytermList(opts.keyterms)) params.append('keyterms', term);
+  if (opts.noVerbatim) params.set('no_verbatim', 'true');
+  // Also drops the server's vad_threshold from 0.4 to 0.15, so speech is picked
+  // up more eagerly once the background is filtered out.
+  if (opts.filterBackgroundAudio) params.set('filter_background_audio', 'true');
   if (opts.vadSilenceThresholdSecs != null) {
     params.set('vad_silence_threshold_secs', String(opts.vadSilenceThresholdSecs));
   }
@@ -284,6 +318,10 @@ module.exports = {
   mapElevenLabsError,
   buildRealtimeUrl,
   normalizeLanguage,
+  keytermList,
+  toList,
+  MAX_KEYTERMS,
+  MAX_KEYTERM_LENGTH,
   DEFAULT_MODEL,
   DEFAULT_BASE_URL,
   SAMPLE_RATE

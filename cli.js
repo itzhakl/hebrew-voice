@@ -3,7 +3,14 @@
 const { spawn } = require('child_process');
 const config = require('./config');
 const { Endpointer } = require('./vad');
-const { ElevenLabsProvider, parseElevenLabsCredential, normalizeLanguage } = require('./elevenlabs');
+const {
+  ElevenLabsProvider,
+  parseElevenLabsCredential,
+  normalizeLanguage,
+  keytermList,
+  MAX_KEYTERMS,
+  MAX_KEYTERM_LENGTH
+} = require('./elevenlabs');
 const server = require('./server');
 
 const ENV_VAR = 'VOICE_STREAM_BASE_URL';
@@ -20,6 +27,8 @@ const USAGE = `rtl-caret voice - Hebrew dictation for Claude Code's terminal /vo
   --port <n>       port to bind or probe (default 8765)
   --lang <code>    ISO-639-1 language, "he" for Hebrew
   --model <id>     Scribe model id (default scribe_v2_realtime)
+  --secondary <c>  other languages in the same sentence (default "en")
+  --keyterm <t>    bias a word the model mishears; repeatable, max 50
   --verbose        log every protocol step
 
 Configuration lives in ${config.configPath()}.
@@ -39,6 +48,10 @@ function parse(argv) {
     if (a === '--port') opts.overrides.port = Number(head[++i]);
     else if (a === '--lang') opts.overrides.language = head[++i];
     else if (a === '--model') opts.overrides.model = head[++i];
+    else if (a === '--secondary') opts.overrides.secondaryLanguages = head[++i];
+    else if (a === '--keyterm') {
+      opts.overrides.keyterms = (opts.overrides.keyterms || []).concat(head[++i]);
+    }
     else if (a === '--verbose') opts.verbose = true;
     else if (!opts.sub) opts.sub = a;
     else opts.args = (opts.args || []).concat(a);
@@ -55,7 +68,12 @@ function buildProvider(cfg) {
     baseUrl: cfg.baseUrl,
     model: cfg.model,
     commitStrategy: cfg.commitStrategy,
-    languageCode: cfg.language
+    languageCode: cfg.language,
+    secondaryLanguages: cfg.secondaryLanguages,
+    keyterms: cfg.keyterms,
+    noVerbatim: cfg.noVerbatim,
+    filterBackgroundAudio: cfg.filterBackgroundAudio,
+    vadSilenceThresholdSecs: cfg.vadSilenceThresholdSecs
   });
 }
 
@@ -147,6 +165,14 @@ async function cmdStatus(cfg) {
   console.log(`config     ${config.configPath()}`);
   console.log(`credential ${cfg.credential ? 'set' : 'MISSING - run: rtl-caret voice setup'}`);
   console.log(`provider   ${cfg.provider} (${cfg.model}, ${normalizeLanguage(cfg.language)})`);
+  const secondary = cfg.secondaryLanguages.map(normalizeLanguage).filter((c) => c && c !== normalizeLanguage(cfg.language));
+  console.log(`languages  ${normalizeLanguage(cfg.language)}${secondary.length ? ` + ${secondary.join(' ')}` : ' only'}`);
+  // Silently dropped keyterms would otherwise look like the model ignoring them.
+  const terms = keytermList(cfg.keyterms);
+  if (cfg.keyterms.length) {
+    const dropped = cfg.keyterms.length - terms.length;
+    console.log(`keyterms   ${terms.join(', ')}${dropped ? `  (${dropped} dropped: over ${MAX_KEYTERM_LENGTH} chars or past ${MAX_KEYTERMS})` : ''}`);
+  }
   if (process.env[ENV_VAR]) console.log(`${ENV_VAR.padEnd(10)} ${process.env[ENV_VAR]} (already in this shell)`);
 
   if (!found.length) {
@@ -194,6 +220,8 @@ async function cmdSetup(overrides) {
   const patch = { credential };
   if (overrides.language) patch.language = overrides.language;
   if (overrides.model) patch.model = overrides.model;
+  if (overrides.secondaryLanguages) patch.secondaryLanguages = overrides.secondaryLanguages;
+  if (overrides.keyterms) patch.keyterms = overrides.keyterms;
   if (overrides.port) patch.port = overrides.port;
   const cfg = config.load(patch);
   // Reject the credential now, at the one moment the user is looking at it.

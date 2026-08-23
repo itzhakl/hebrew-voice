@@ -4,7 +4,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 
-const { DEFAULT_MODEL, DEFAULT_BASE_URL } = require('./elevenlabs');
+const { DEFAULT_MODEL, DEFAULT_BASE_URL, toList } = require('./elevenlabs');
 
 const DEFAULTS = {
   enabled: true,
@@ -13,6 +13,19 @@ const DEFAULTS = {
   model: DEFAULT_MODEL,
   baseUrl: DEFAULT_BASE_URL,
   commitStrategy: 'vad',
+  // Dictating into a terminal is code-switched by nature: paths, commands and
+  // library names arrive in English mid-Hebrew-sentence. Naming English as a
+  // secondary language is what stops them being transliterated into Hebrew
+  // letters - the job the two-engine hybrid provider used to do.
+  secondaryLanguages: ['en'],
+  // Words the model would otherwise mishear. Max 50, each at most 20 chars.
+  keyterms: [],
+  // Strips fillers and false starts. Off by default: it also edits speech that
+  // was not a filler, and dictation should return what was said.
+  noVerbatim: false,
+  filterBackgroundAudio: false,
+  // null leaves the server on its own 1.5 s. Lower commits sooner mid-sentence.
+  vadSilenceThresholdSecs: null,
   port: 8765,
   vadThreshold: 0.005,
   endpointMs: 600,
@@ -52,6 +65,10 @@ function num(value, fallback) {
   return Number.isFinite(n) ? n : fallback;
 }
 
+function bool(value) {
+  return value === true || value === 'true' || value === 1 || value === '1';
+}
+
 /* File first, then environment overrides, then explicit CLI flags. */
 function load(overrides = {}, env = process.env, file = configPath()) {
   const fileCfg = readFileConfig(file);
@@ -72,6 +89,16 @@ function load(overrides = {}, env = process.env, file = configPath()) {
   // time, so anything not a Scribe model falls back to the default.
   if (!/^scribe/.test(String(cfg.model || ''))) cfg.model = DEFAULTS.model;
   if (cfg.commitStrategy !== 'manual') cfg.commitStrategy = 'vad';
+  // A hand-edited voice.json may hold a bare string where a list belongs.
+  cfg.secondaryLanguages = toList(cfg.secondaryLanguages);
+  cfg.keyterms = toList(cfg.keyterms);
+  cfg.noVerbatim = bool(cfg.noVerbatim);
+  cfg.filterBackgroundAudio = bool(cfg.filterBackgroundAudio);
+  // The server rejects anything outside 0.3-3.0 rather than clamping it.
+  cfg.vadSilenceThresholdSecs =
+    cfg.vadSilenceThresholdSecs == null
+      ? null
+      : Math.min(3, Math.max(0.3, num(cfg.vadSilenceThresholdSecs, 1.5)));
   return cfg;
 }
 
