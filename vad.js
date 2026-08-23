@@ -7,7 +7,7 @@ const DEFAULTS = {
   sampleRate: 16000,
   vadThreshold: 0.005,
   endpointMs: 600,
-  // Chirp finalizes long Hebrew sentences on its own; a short cap only chops
+  // Scribe finalizes long Hebrew sentences on its own; a short cap only chops
   // them mid-thought, so this sits well above the extension's 4000.
   maxSegmentMs: 12000,
   minUtteranceMs: 300

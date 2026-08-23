@@ -3,8 +3,7 @@
 const { spawn } = require('child_process');
 const config = require('./config');
 const { Endpointer } = require('./vad');
-const { ChirpProvider, parseGoogleCredential } = require('./chirp');
-const { HybridProvider } = require('./hybrid');
+const { ElevenLabsProvider, parseElevenLabsCredential, normalizeLanguage } = require('./elevenlabs');
 const server = require('./server');
 
 const ENV_VAR = 'VOICE_STREAM_BASE_URL';
@@ -15,13 +14,12 @@ const USAGE = `rtl-caret voice - Hebrew dictation for Claude Code's terminal /vo
   rtl-caret voice serve             run the server in the foreground
   rtl-caret voice status            report whether a server is reachable
   rtl-caret voice env               print the export line for an existing server
-  rtl-caret voice setup             store the Google Cloud credential
+  rtl-caret voice setup             store the ElevenLabs API key
   rtl-caret voice test [seconds]    record from the microphone and transcribe
 
   --port <n>       port to bind or probe (default 8765)
-  --lang <code>    BCP-47 language, "iw-IL" for Hebrew
-  --provider <p>   chirp (one engine) or hybrid (live interims + accurate final)
-  --project <id>   Google Cloud project id
+  --lang <code>    ISO-639-1 language, "he" for Hebrew
+  --model <id>     Scribe model id (default scribe_v2_realtime)
   --verbose        log every protocol step
 
 Configuration lives in ${config.configPath()}.
@@ -40,8 +38,7 @@ function parse(argv) {
     const a = head[i];
     if (a === '--port') opts.overrides.port = Number(head[++i]);
     else if (a === '--lang') opts.overrides.language = head[++i];
-    else if (a === '--provider') opts.overrides.provider = head[++i];
-    else if (a === '--project') opts.overrides.projectId = head[++i];
+    else if (a === '--model') opts.overrides.model = head[++i];
     else if (a === '--verbose') opts.verbose = true;
     else if (!opts.sub) opts.sub = a;
     else opts.args = (opts.args || []).concat(a);
@@ -50,25 +47,16 @@ function parse(argv) {
 }
 
 function buildProvider(cfg) {
-  // Fail fast on a malformed credential instead of erroring on the first mic
-  // press, when the failure is invisible behind Claude's UI.
-  parseGoogleCredential(cfg.credential, cfg.projectId || undefined, cfg.location);
-  const fast = new ChirpProvider({
+  // Fail fast on a missing or wrong-vendor key instead of erroring on the
+  // first mic press, when the failure is invisible behind Claude's UI.
+  parseElevenLabsCredential(cfg.credential);
+  return new ElevenLabsProvider({
     credential: cfg.credential,
-    projectId: cfg.projectId || undefined,
-    location: cfg.location,
+    baseUrl: cfg.baseUrl,
     model: cfg.model,
+    commitStrategy: cfg.commitStrategy,
     languageCode: cfg.language
   });
-  if (cfg.provider === 'chirp') return fast;
-  const accurate = new ChirpProvider({
-    credential: cfg.credential,
-    projectId: cfg.projectId || undefined,
-    location: cfg.hybridFinalLocation,
-    model: cfg.hybridFinalModel,
-    languageCode: cfg.language
-  });
-  return new HybridProvider(fast, accurate);
 }
 
 function serverOptions(cfg, verbose) {
@@ -109,7 +97,7 @@ async function cmdServe(cfg, verbose) {
     console.error(`another rtl-caret voice server already owns ${baseUrl(port)}`);
     return 0;
   }
-  console.error(`rtl-caret voice on ${baseUrl(port)}  (${cfg.provider}/${cfg.model} ${cfg.language})`);
+  console.error(`rtl-caret voice on ${baseUrl(port)}  (${cfg.model}, ${normalizeLanguage(cfg.language)})`);
   console.error(`export ${ENV_VAR}=${baseUrl(port)}`);
   await new Promise((resolve) => {
     const stop = () => {
@@ -158,7 +146,7 @@ async function cmdStatus(cfg) {
 
   console.log(`config     ${config.configPath()}`);
   console.log(`credential ${cfg.credential ? 'set' : 'MISSING - run: rtl-caret voice setup'}`);
-  console.log(`provider   ${cfg.provider} (${cfg.model} @ ${cfg.location}, ${cfg.language})`);
+  console.log(`provider   ${cfg.provider} (${cfg.model}, ${normalizeLanguage(cfg.language)})`);
   if (process.env[ENV_VAR]) console.log(`${ENV_VAR.padEnd(10)} ${process.env[ENV_VAR]} (already in this shell)`);
 
   if (!found.length) {
@@ -197,20 +185,19 @@ function readStdin() {
 }
 
 async function cmdSetup(overrides) {
-  console.error('Paste a Google Cloud API key or the whole service-account JSON, then Ctrl-D:');
+  console.error('Paste your ElevenLabs API key, then Ctrl-D:');
   const credential = await readStdin();
   if (!credential) {
     console.error('nothing read - aborted');
     return 1;
   }
   const patch = { credential };
-  if (overrides.projectId) patch.projectId = overrides.projectId;
   if (overrides.language) patch.language = overrides.language;
-  if (overrides.provider) patch.provider = overrides.provider;
+  if (overrides.model) patch.model = overrides.model;
   if (overrides.port) patch.port = overrides.port;
   const cfg = config.load(patch);
   // Reject the credential now, at the one moment the user is looking at it.
-  parseGoogleCredential(cfg.credential, cfg.projectId || undefined, cfg.location);
+  parseElevenLabsCredential(cfg.credential);
   const file = config.save(patch);
   console.error(`saved to ${file} (mode 0600)`);
   return 0;

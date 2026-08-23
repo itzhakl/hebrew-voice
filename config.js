@@ -4,20 +4,15 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 
-/* Measured on live Hebrew (2026-07): chirp_3 streams no interim text until the
- * stream closes; "long" streams interims ~0.2-0.4 s behind speech and
- * finalizes +0.77 s after flush, at equal or better quality. "long" is the
- * latency winner by ~3x - but that is language-dependent. chirp_3 measured
- * faster from the US multi-region than from eu. */
+const { DEFAULT_MODEL, DEFAULT_BASE_URL } = require('./elevenlabs');
+
 const DEFAULTS = {
   enabled: true,
-  provider: 'hybrid',
-  language: 'iw-IL',
-  projectId: '',
-  location: 'eu',
-  model: 'long',
-  hybridFinalModel: 'chirp_3',
-  hybridFinalLocation: 'us',
+  provider: 'elevenlabs',
+  language: 'he',
+  model: DEFAULT_MODEL,
+  baseUrl: DEFAULT_BASE_URL,
+  commitStrategy: 'vad',
   port: 8765,
   vadThreshold: 0.005,
   endpointMs: 600,
@@ -44,13 +39,11 @@ function readFileConfig(file = configPath()) {
   }
 }
 
-/* The credential may live in the config file, inline in the environment, or in
- * a file the environment points at - the shape voice-shim already used. */
+/* The key may live in the config file or in the environment. XI_API_KEY is
+ * what ElevenLabs' own tooling exports, so both spellings are honoured. */
 function resolveCredential(fileCfg, env) {
-  const inline = (env.GOOGLE_STT_CREDENTIAL || '').trim();
+  const inline = (env.ELEVENLABS_API_KEY || env.XI_API_KEY || '').trim();
   if (inline) return inline;
-  const keyFile = (env.GOOGLE_APPLICATION_CREDENTIALS || '').trim();
-  if (keyFile && fs.existsSync(keyFile)) return fs.readFileSync(keyFile, 'utf8').trim();
   return String(fileCfg.credential || '').trim();
 }
 
@@ -68,12 +61,17 @@ function load(overrides = {}, env = process.env, file = configPath()) {
   if (env.RTL_VOICE_PORT) cfg.port = num(env.RTL_VOICE_PORT, cfg.port);
   if (env.RTL_VOICE_LANGUAGE) cfg.language = env.RTL_VOICE_LANGUAGE;
   if (env.RTL_VOICE_PROVIDER) cfg.provider = env.RTL_VOICE_PROVIDER;
-  if (env.GOOGLE_STT_PROJECT_ID) cfg.projectId = env.GOOGLE_STT_PROJECT_ID;
+  if (env.RTL_VOICE_MODEL) cfg.model = env.RTL_VOICE_MODEL;
   for (const [key, value] of Object.entries(overrides)) {
     if (value !== undefined) cfg[key] = value;
   }
   cfg.port = num(cfg.port, DEFAULTS.port);
-  if (cfg.provider !== 'chirp' && cfg.provider !== 'hybrid') cfg.provider = DEFAULTS.provider;
+  if (cfg.provider !== 'elevenlabs') cfg.provider = DEFAULTS.provider;
+  // A voice.json written for the Google backend names a Chirp model ("long",
+  // "chirp_3"). Sending that as model_id only earns an invalid_request at mic
+  // time, so anything not a Scribe model falls back to the default.
+  if (!/^scribe/.test(String(cfg.model || ''))) cfg.model = DEFAULTS.model;
+  if (cfg.commitStrategy !== 'manual') cfg.commitStrategy = 'vad';
   return cfg;
 }
 
