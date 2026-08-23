@@ -195,10 +195,11 @@ function handleConnection(ws, opts) {
 }
 
 class VoiceStreamServer {
-  constructor(httpServer, wss, port) {
+  constructor(httpServer, wss, port, provider) {
     this.httpServer = httpServer;
     this.wss = wss;
     this.port = port;
+    this.provider = provider;
   }
 
   /* Binds 127.0.0.1 only. Rejects with EADDRINUSE when the port is taken. */
@@ -229,7 +230,7 @@ class VoiceStreamServer {
       httpServer.once('error', reject);
       httpServer.listen(opts.port, '127.0.0.1', () => {
         httpServer.removeListener('error', reject);
-        resolve(new VoiceStreamServer(httpServer, wss, httpServer.address().port));
+        resolve(new VoiceStreamServer(httpServer, wss, httpServer.address().port, opts.provider));
       });
     });
   }
@@ -238,6 +239,13 @@ class VoiceStreamServer {
     for (const client of this.wss.clients) client.terminate();
     return new Promise((resolve) => {
       this.wss.close(() => this.httpServer.close(() => resolve()));
+    }).then(() => {
+      // A local engine holds a child process and a card's worth of memory:
+      // closing the socket is not enough to give either of them back.
+      if (this.provider && typeof this.provider.shutdown === 'function') {
+        return this.provider.shutdown();
+      }
+      return undefined;
     });
   }
 }

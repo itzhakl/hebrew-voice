@@ -11,6 +11,7 @@ const {
   MAX_KEYTERMS,
   MAX_KEYTERM_LENGTH
 } = require('./elevenlabs');
+const { WhisperProvider, venvPython, resolvePython } = require('./whisper');
 const server = require('./server');
 
 const ENV_VAR = 'VOICE_STREAM_BASE_URL';
@@ -25,6 +26,7 @@ const USAGE = `rtl-caret voice - Hebrew dictation for Claude Code's terminal /vo
   rtl-caret voice test [seconds]    record from the microphone and transcribe
 
   --port <n>       port to bind or probe (default 8765)
+  --provider <p>   elevenlabs (cloud Scribe) or whisper (local faster-whisper)
   --lang <code>    ISO-639-1 language, "he" for Hebrew
   --model <id>     Scribe model id (default scribe_v2_realtime)
   --secondary <c>  other languages in the same sentence (default "en")
@@ -46,6 +48,7 @@ function parse(argv) {
   for (let i = 0; i < head.length; i++) {
     const a = head[i];
     if (a === '--port') opts.overrides.port = Number(head[++i]);
+    else if (a === '--provider') opts.overrides.provider = head[++i];
     else if (a === '--lang') opts.overrides.language = head[++i];
     else if (a === '--model') opts.overrides.model = head[++i];
     else if (a === '--secondary') opts.overrides.secondaryLanguages = head[++i];
@@ -60,6 +63,16 @@ function parse(argv) {
 }
 
 function buildProvider(cfg, log) {
+  if (cfg.provider === 'whisper') {
+    return new WhisperProvider(
+      Object.assign({}, cfg.whisper, {
+        languageCode: normalizeLanguage(cfg.language),
+        settleTimeoutMs: cfg.settleTimeoutMs,
+        vadThreshold: cfg.vadThreshold,
+        log
+      })
+    );
+  }
   // Fail fast on a missing or wrong-vendor key instead of erroring on the
   // first mic press, when the failure is invisible behind Claude's UI.
   parseElevenLabsCredential(cfg.credential);
@@ -79,10 +92,17 @@ function buildProvider(cfg, log) {
   });
 }
 
+function engineLabel(cfg) {
+  if (cfg.provider === 'whisper') {
+    return `${cfg.whisper.model} on ${cfg.whisper.device}, ${normalizeLanguage(cfg.language)}`;
+  }
+  return `${cfg.model}, ${normalizeLanguage(cfg.language)}`;
+}
+
 function serverOptions(cfg, verbose) {
   return {
     port: cfg.port,
-    provider: buildProvider(cfg, verbose ? (m) => console.error(`[scribe] ${m}`) : undefined),
+    provider: buildProvider(cfg, verbose ? (m) => console.error(`[${cfg.provider}] ${m}`) : undefined),
     makeEndpointer: () =>
       new Endpointer({
         vadThreshold: cfg.vadThreshold,
@@ -117,8 +137,17 @@ async function cmdServe(cfg, verbose) {
     console.error(`another rtl-caret voice server already owns ${baseUrl(port)}`);
     return 0;
   }
-  console.error(`rtl-caret voice on ${baseUrl(port)}  (${cfg.model}, ${normalizeLanguage(cfg.language)})`);
+  console.error(`rtl-caret voice on ${baseUrl(port)}  (${engineLabel(cfg)})`);
   console.error(`export ${ENV_VAR}=${baseUrl(port)}`);
+  // The local model takes seconds to load. A service that waits for the first
+  // microphone press to find that out spends them in front of the user.
+  const provider = instance && instance.provider;
+  if (provider && typeof provider.preload === 'function') {
+    provider.preload().then(
+      (info) => console.error(`engine ready: ${info.model} on ${info.device}/${info.computeType} (${info.loadMs}ms)`),
+      (e) => console.error(`engine failed to load: ${e.message}`)
+    );
+  }
   await new Promise((resolve) => {
     const stop = () => {
       instance.close().then(resolve, resolve);
@@ -160,25 +189,10 @@ function exec(command, extraEnv) {
   });
 }
 
-async function cmdStatus(cfg) {
-  const found = await scan(cfg.port);
+/* Where dictation would actually go: our own server, a foreign voice_stream
+ * server, or nothing. Shared by both engines - the redirect is the same. */
+function statusServers(cfg, found) {
   const ours = found.find((f) => f.kind === 'ours');
-
-  console.log(`config     ${config.configPath()}`);
-  console.log(`credential ${cfg.credential ? 'set' : 'MISSING - run: rtl-caret voice setup'}`);
-  console.log(`provider   ${cfg.provider} (${cfg.model}, ${normalizeLanguage(cfg.language)})`);
-  const secondary = cfg.secondaryLanguages.map(normalizeLanguage).filter((c) => c && c !== normalizeLanguage(cfg.language));
-  console.log(`languages  ${normalizeLanguage(cfg.language)}${secondary.length ? ` + ${secondary.join(' ')}` : ' only'}`);
-  // The knobs that decide whether speech is heard at all, and how long a pause
-  // may be before the sentence is cut - the two things a user reports as
-  // "it does not pick me up" and "it cuts me off".
-  console.log(`audio      silence ${cfg.vadSilenceThresholdSecs == null ? 'server default (1.5s)' : `${cfg.vadSilenceThresholdSecs}s`}, background filter ${cfg.filterBackgroundAudio ? 'on' : 'off'}, no-verbatim ${cfg.noVerbatim ? 'on' : 'off'}`);
-  // Silently dropped keyterms would otherwise look like the model ignoring them.
-  const terms = keytermList(cfg.keyterms);
-  if (cfg.keyterms.length) {
-    const dropped = cfg.keyterms.length - terms.length;
-    console.log(`keyterms   ${terms.join(', ')}${dropped ? `  (${dropped} dropped: over ${MAX_KEYTERM_LENGTH} chars or past ${MAX_KEYTERMS})` : ''}`);
-  }
   if (process.env[ENV_VAR]) console.log(`${ENV_VAR.padEnd(10)} ${process.env[ENV_VAR]} (already in this shell)`);
 
   if (!found.length) {
@@ -195,6 +209,46 @@ async function cmdStatus(cfg) {
   }
   if (ours) console.log(`export     ${ENV_VAR}=${baseUrl(ours.port)}`);
   return ours ? 0 : 1;
+}
+
+async function cmdStatus(cfg) {
+  const found = await scan(cfg.port);
+  const whisper = cfg.provider === 'whisper';
+
+  console.log(`config     ${config.configPath()}`);
+  if (whisper) {
+    const python = resolvePython(cfg.whisper.python);
+    console.log('credential not needed - whisper runs on this machine');
+    console.log(`python     ${python}${python === venvPython() ? '' : '  (not the rtl-caret venv)'}`);
+  } else {
+    console.log(`credential ${cfg.credential ? 'set' : 'MISSING - run: rtl-caret voice setup'}`);
+  }
+  console.log(`provider   ${cfg.provider} (${engineLabel(cfg)})`);
+
+  if (whisper) {
+    // Whisper is given one language and decodes code-switched English inside
+    // it on its own; there is no secondary-language list to report.
+    console.log(`languages  ${normalizeLanguage(cfg.language)}`);
+    console.log(`decoding   partials every ${cfg.whisper.partialMs}ms at beam ${cfg.whisper.partialBeamSize}, commit at beam ${cfg.whisper.finalBeamSize}`);
+    // With no server-side endpointer, these two numbers ARE the endpointing -
+    // "it cuts me off" and "it never commits" both land here.
+    console.log(`endpoint   local VAD: ${cfg.endpointMs}ms of silence commits, ${cfg.maxSegmentMs}ms caps a segment`);
+    return statusServers(cfg, found);
+  }
+
+  const secondary = cfg.secondaryLanguages.map(normalizeLanguage).filter((c) => c && c !== normalizeLanguage(cfg.language));
+  console.log(`languages  ${normalizeLanguage(cfg.language)}${secondary.length ? ` + ${secondary.join(' ')}` : ' only'}`);
+  // The knobs that decide whether speech is heard at all, and how long a pause
+  // may be before the sentence is cut - the two things a user reports as
+  // "it does not pick me up" and "it cuts me off".
+  console.log(`audio      silence ${cfg.vadSilenceThresholdSecs == null ? 'server default (1.5s)' : `${cfg.vadSilenceThresholdSecs}s`}, background filter ${cfg.filterBackgroundAudio ? 'on' : 'off'}, no-verbatim ${cfg.noVerbatim ? 'on' : 'off'}`);
+  // Silently dropped keyterms would otherwise look like the model ignoring them.
+  const terms = keytermList(cfg.keyterms);
+  if (cfg.keyterms.length) {
+    const dropped = cfg.keyterms.length - terms.length;
+    console.log(`keyterms   ${terms.join(', ')}${dropped ? `  (${dropped} dropped: over ${MAX_KEYTERM_LENGTH} chars or past ${MAX_KEYTERMS})` : ''}`);
+  }
+  return statusServers(cfg, found);
 }
 
 async function cmdEnv(cfg) {
@@ -350,4 +404,4 @@ async function run(argv) {
   return 1;
 }
 
-module.exports = { run, parse, buildProvider, USAGE, ENV_VAR };
+module.exports = { run, parse, buildProvider, engineLabel, USAGE, ENV_VAR };

@@ -5,10 +5,37 @@ const os = require('os');
 const path = require('path');
 
 const { DEFAULT_MODEL, DEFAULT_BASE_URL, toList } = require('./elevenlabs');
+const { DEFAULT_MODEL: DEFAULT_WHISPER_MODEL } = require('./whisper');
+
+const PROVIDERS = new Set(['elevenlabs', 'whisper']);
+
+/* The local engine's knobs live in their own object: none of them mean
+ * anything to Scribe, and a flat namespace would make "model" ambiguous. */
+const WHISPER_DEFAULTS = {
+  model: DEFAULT_WHISPER_MODEL,
+  // Resolved in the sidecar, which is the only place that can ask CTranslate2
+  // whether a usable card is actually there.
+  device: 'auto',
+  computeType: 'auto',
+  // Empty means the venv under ~/.local/share/rtl-caret.
+  python: '',
+  cacheDir: '',
+  offline: false,
+  partialMs: 700,
+  // A hypothesis that will be replaced in under a second does not earn a beam
+  // search; the commit does.
+  partialBeamSize: 1,
+  finalBeamSize: 5,
+  // Fed silence, Whisper invents a sentence rather than returning nothing. A
+  // buffer has to hold this much speech before it is worth decoding at all.
+  minVoicedMs: 200,
+  startupTimeoutMs: 120000
+};
 
 const DEFAULTS = {
   enabled: true,
   provider: 'elevenlabs',
+  whisper: WHISPER_DEFAULTS,
   language: 'he',
   model: DEFAULT_MODEL,
   baseUrl: DEFAULT_BASE_URL,
@@ -87,11 +114,16 @@ function load(overrides = {}, env = process.env, file = configPath()) {
     if (value !== undefined) cfg[key] = value;
   }
   cfg.port = num(cfg.port, DEFAULTS.port);
-  if (cfg.provider !== 'elevenlabs') cfg.provider = DEFAULTS.provider;
+  if (!PROVIDERS.has(cfg.provider)) cfg.provider = DEFAULTS.provider;
   // A voice.json written for the Google backend names a Chirp model ("long",
   // "chirp_3"). Sending that as model_id only earns an invalid_request at mic
-  // time, so anything not a Scribe model falls back to the default.
-  if (!/^scribe/.test(String(cfg.model || ''))) cfg.model = DEFAULTS.model;
+  // time, so anything not a Scribe model falls back to the default. Only the
+  // remote engine is checked: `model` names a Scribe id, and the local engine
+  // names its own under `whisper.model`.
+  if (cfg.provider === 'elevenlabs' && !/^scribe/.test(String(cfg.model || ''))) {
+    cfg.model = DEFAULTS.model;
+  }
+  cfg.whisper = normalizeWhisper(cfg.whisper);
   if (cfg.commitStrategy !== 'manual') cfg.commitStrategy = 'vad';
   // A hand-edited voice.json may hold a bare string where a list belongs.
   cfg.secondaryLanguages = toList(cfg.secondaryLanguages);
@@ -107,6 +139,31 @@ function load(overrides = {}, env = process.env, file = configPath()) {
   return cfg;
 }
 
+function oneOf(value, allowed, fallback) {
+  const v = String(value || '').trim();
+  return allowed.includes(v) ? v : fallback;
+}
+
+/* A file config replaces the whole `whisper` object rather than merging into
+ * it, so every key has to be filled back in here. */
+function normalizeWhisper(raw) {
+  const w = Object.assign({}, WHISPER_DEFAULTS, raw && typeof raw === 'object' ? raw : {});
+  w.model = String(w.model || '').trim() || WHISPER_DEFAULTS.model;
+  w.device = oneOf(w.device, ['auto', 'cuda', 'cpu'], 'auto');
+  w.computeType = String(w.computeType || '').trim() || 'auto';
+  w.python = String(w.python || '').trim();
+  w.cacheDir = String(w.cacheDir || '').trim();
+  w.offline = bool(w.offline);
+  // Below ~250 ms the card spends its whole time on hypotheses that are
+  // replaced before anyone reads them, and the commit queues behind them.
+  w.partialMs = Math.max(250, num(w.partialMs, WHISPER_DEFAULTS.partialMs));
+  w.partialBeamSize = Math.min(5, Math.max(1, Math.round(num(w.partialBeamSize, 1))));
+  w.finalBeamSize = Math.min(10, Math.max(1, Math.round(num(w.finalBeamSize, 5))));
+  w.minVoicedMs = Math.max(0, num(w.minVoicedMs, WHISPER_DEFAULTS.minVoicedMs));
+  w.startupTimeoutMs = Math.max(5000, num(w.startupTimeoutMs, WHISPER_DEFAULTS.startupTimeoutMs));
+  return w;
+}
+
 /* 0600 from creation, never after: the credential must not exist on disk
  * world-readable even briefly. */
 function save(patch, file = configPath()) {
@@ -120,4 +177,15 @@ function save(patch, file = configPath()) {
   return file;
 }
 
-module.exports = { DEFAULTS, load, save, configPath, configDir, readFileConfig, resolveCredential };
+module.exports = {
+  DEFAULTS,
+  WHISPER_DEFAULTS,
+  PROVIDERS,
+  load,
+  save,
+  configPath,
+  configDir,
+  readFileConfig,
+  resolveCredential,
+  normalizeWhisper
+};
