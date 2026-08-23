@@ -61,6 +61,11 @@ const DEFAULTS = {
   settleTimeoutMs: 3000,
   port: 8765,
   vadThreshold: 0.005,
+  // How much louder than the measured room speech has to be. Three is about
+  // 10 dB and suits a headset; a laptop microphone with its gain wound up
+  // hears itself almost as loudly as it hears you, and needs less.
+  // `rtl-caret voice levels` measures both and names the number.
+  vadNoiseRatio: 3,
   endpointMs: 600,
   maxSegmentMs: 12000,
   credential: ''
@@ -131,6 +136,7 @@ function load(overrides = {}, env = process.env, file = configPath()) {
   cfg.secondaryLanguages = toList(cfg.secondaryLanguages);
   cfg.keyterms = toList(cfg.keyterms);
   cfg.noVerbatim = bool(cfg.noVerbatim);
+  cfg.vadNoiseRatio = Math.min(10, Math.max(1.2, num(cfg.vadNoiseRatio, DEFAULTS.vadNoiseRatio)));
   cfg.settleTimeoutMs = Math.min(4500, Math.max(500, num(cfg.settleTimeoutMs, DEFAULTS.settleTimeoutMs)));
   cfg.filterBackgroundAudio = bool(cfg.filterBackgroundAudio);
   // The server rejects anything outside 0.3-3.0 rather than clamping it.

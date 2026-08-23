@@ -25,6 +25,7 @@ const USAGE = `rtl-caret voice - Hebrew dictation for Claude Code's terminal /vo
   rtl-caret voice env               print the export line for an existing server
   rtl-caret voice setup             store the ElevenLabs API key
   rtl-caret voice test [seconds]    record from the microphone and transcribe
+  rtl-caret voice levels [seconds]  measure this microphone: room, speech, bar
 
   --port <n>       port to bind or probe (default 8765)
   --provider <p>   elevenlabs (cloud Scribe) or whisper (local faster-whisper)
@@ -106,6 +107,7 @@ function serverOptions(cfg, verbose) {
     makeEndpointer: () =>
       new Endpointer({
         vadThreshold: cfg.vadThreshold,
+        noiseRatio: cfg.vadNoiseRatio,
         endpointMs: cfg.endpointMs,
         maxSegmentMs: cfg.maxSegmentMs
       }),
@@ -233,7 +235,8 @@ async function cmdStatus(cfg) {
     // With no server-side endpointer, these two numbers ARE the endpointing -
     // "it cuts me off" and "it never commits" both land here.
     console.log(`endpoint   local VAD: ${cfg.endpointMs}ms of silence commits, ${cfg.maxSegmentMs}ms caps a segment`);
-    console.log(`speech     room measured over the first 300ms, ${vad.DEFAULTS.noiseRatio}x above it counts as speech (floor ${cfg.vadThreshold}), Silero ${cfg.whisper.vadFilter ? 'on' : 'OFF'}`);
+    console.log(`speech     room measured over the first 300ms, ${cfg.vadNoiseRatio}x above it counts as speech (floor ${cfg.vadThreshold}), Silero ${cfg.whisper.vadFilter ? 'on' : 'OFF'}`);
+    console.log('           run "rtl-caret voice levels" if pauses never commit');
     return statusServers(cfg, found);
   }
 
@@ -297,6 +300,24 @@ const RECORDERS = [
   ['sox', ['-q', '-d', '-t', 'raw', '-b', '16', '-e', 'signed-integer', '-r', '16000', '-c', '1', '-', 'trim', '0', null]]
 ];
 
+/* First recorder that actually produces audio, with the frame it produced -
+ * dropping that frame would eat the start of the recording. */
+async function startRecorder(secs) {
+  for (const [bin, template] of RECORDERS) {
+    const args = template.map((a) => (a === null ? String(secs) : a));
+    const child = spawn(bin, args, { stdio: ['ignore', 'pipe', 'ignore'] });
+    const first = await new Promise((resolve) => {
+      child.on('error', () => resolve(null));
+      child.stdout.once('data', (chunk) => resolve(chunk));
+      // No audio at all within a second means this recorder is not working.
+      setTimeout(() => resolve(child.exitCode === null ? Buffer.alloc(0) : null), 1000);
+    });
+    if (first) return { child, first };
+    child.kill();
+  }
+  return null;
+}
+
 /* Records from the microphone and drives the real socket, so a green result
  * proves the whole chain - protocol, provider, credential - not just the API. */
 async function cmdTest(cfg, verbose, seconds) {
@@ -330,22 +351,10 @@ async function cmdTest(cfg, verbose, seconds) {
     ws.on('error', reject);
   });
 
-  for (const [bin, template] of RECORDERS) {
-    const args = template.map((a) => (a === null ? String(secs) : a));
-    const child = spawn(bin, args, { stdio: ['ignore', 'pipe', 'ignore'] });
-    const started = await new Promise((resolve) => {
-      child.on('error', () => resolve(false));
-      child.stdout.once('data', (chunk) => {
-        ws.send(chunk, { binary: true });
-        resolve(true);
-      });
-      // No audio at all within a second means this recorder is not working.
-      setTimeout(() => resolve(child.exitCode === null), 1000);
-    });
-    if (started) {
-      recorder = child;
-      break;
-    }
+  const started = await startRecorder(secs);
+  if (started) {
+    recorder = started.child;
+    if (started.first.length) ws.send(started.first, { binary: true });
   }
   if (!recorder) {
     console.error('no working recorder found (tried arecord, sox) - install one to use "voice test"');
@@ -367,6 +376,70 @@ async function cmdTest(cfg, verbose, seconds) {
     return 1;
   }
   console.log(text);
+  return 0;
+}
+
+/* Records without transcribing and reports the levels the endpointer works
+ * from. This is the answer to "dictation only commits when I let go": either
+ * the room clears the bar, or speech does not, and no amount of staring at
+ * transcripts will say which. Nothing is written to disk and nothing is sent
+ * anywhere - the audio is turned into one RMS number per 20 ms and dropped. */
+async function cmdLevels(cfg, seconds) {
+  const secs = Number(seconds) > 0 ? Number(seconds) : 8;
+  const started = await startRecorder(secs);
+  if (!started) {
+    console.error('no working recorder found (tried arecord, sox)');
+    return 1;
+  }
+  const recorder = started.child;
+  console.error(`recording ${secs}s - stay QUIET for the first 3, then talk normally`);
+
+  const FRAME_BYTES = 640; // 20 ms of 16 kHz mono linear16
+  const levels = [];
+  let carry = started.first;
+  recorder.stdout.on('data', (chunk) => {
+    let buf = carry.length ? Buffer.concat([carry, chunk]) : chunk;
+    let off = 0;
+    for (; off + FRAME_BYTES <= buf.length; off += FRAME_BYTES) {
+      let sum = 0;
+      for (let i = 0; i < FRAME_BYTES; i += 2) {
+        const s = buf.readInt16LE(off + i) / 32768;
+        sum += s * s;
+      }
+      levels.push(Math.sqrt(sum / (FRAME_BYTES / 2)));
+    }
+    carry = buf.subarray(off);
+  });
+  await new Promise((resolve) => recorder.on('exit', resolve));
+
+  if (levels.length < 50) {
+    console.error(`only ${levels.length} frames arrived - the microphone produced almost nothing`);
+    return 1;
+  }
+  const pct = (arr, p) => {
+    const sorted = arr.slice().sort((a, b) => a - b);
+    return sorted[Math.min(sorted.length - 1, Math.floor((sorted.length - 1) * p))];
+  };
+  const f = (n) => n.toFixed(4);
+  const quiet = levels.slice(0, Math.min(levels.length, 150));   // the first 3 s
+  const room = pct(quiet, 0.5);
+  const loud = pct(levels, 0.9);
+  const bar = Math.max(cfg.vadThreshold, room * cfg.vadNoiseRatio);
+
+  console.log(`frames     ${levels.length} (${(levels.length * 20) / 1000}s)`);
+  console.log(`room       ${f(room)}   median of the quiet opening`);
+  console.log(`speech     ${f(pct(levels, 0.5))} median, ${f(loud)} at the 90th, ${f(Math.max(...levels))} peak`);
+  console.log(`headroom   speech sits ${(loud / (room || 1e-9)).toFixed(1)}x over the room`);
+  console.log(`bar        ${f(bar)}   what the endpointer would ask speech to beat`);
+  // Whether this microphone can be endpointed at all, and at what ratio.
+  if (loud <= room * 1.3) {
+    console.log('verdict    speech is not louder than the room - check the input gain or use a closer mic');
+  } else if (loud > bar) {
+    console.log(`verdict    OK - speech clears the bar, pauses will commit`);
+  } else {
+    const ratio = Math.max(1.2, Math.floor((loud / room) * 10) / 10 - 0.3);
+    console.log(`verdict    the bar is too high for this microphone - set "vadNoiseRatio": ${ratio} in voice.json`);
+  }
   return 0;
 }
 
@@ -392,6 +465,7 @@ async function run(argv) {
     if (opts.sub === 'status' || !opts.sub) return await cmdStatus(cfg);
     if (opts.sub === 'env') return await cmdEnv(cfg);
     if (opts.sub === 'test') return await cmdTest(cfg, opts.verbose, (opts.args || [])[0]);
+    if (opts.sub === 'levels') return await cmdLevels(cfg, (opts.args || [])[0]);
   } catch (e) {
     console.error(e.message || String(e));
     if (e.hint === 'set-api-key' && !e.message.includes('voice setup')) {
