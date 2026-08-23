@@ -122,7 +122,9 @@ function handleConnection(ws, opts) {
       .then(async () => {
         if (!session) return;
         const text = await session.endSegment();
-        log(`commit (${reason}): ${text.length} chars`);
+        // The measured room and the level speech has to beat: when dictation
+        // "never commits until I let go", these two numbers are the answer.
+        log(`commit (${reason}): ${text.length} chars, room ${endpointer.noiseFloor.toFixed(4)}, speech above ${endpointer.threshold.toFixed(4)}`);
         // Committed DURING recording - Claude ignores transcripts after stop.
         if (text) emit(text, `commit (${reason})`);
         // The engine owed us a final and the deadline is the socket closing:

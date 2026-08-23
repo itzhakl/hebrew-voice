@@ -21,14 +21,16 @@ const WHISPER_DEFAULTS = {
   python: '',
   cacheDir: '',
   offline: false,
-  partialMs: 700,
+  // A hypothesis costs one pass, ~470 ms, and the card is idle between them.
+  // The cadence the user reads is this plus that pass.
+  partialMs: 400,
   // A hypothesis that will be replaced in under a second does not earn a beam
   // search; the commit does.
   partialBeamSize: 1,
   finalBeamSize: 5,
-  // Fed silence, Whisper invents a sentence rather than returning nothing. A
-  // buffer has to hold this much speech before it is worth decoding at all.
-  minVoicedMs: 200,
+  // Silero in front of the decoder. Fed room noise, Whisper does not return
+  // nothing - it invents a sentence. Off only if it ever eats quiet speech.
+  vadFilter: true,
   startupTimeoutMs: 120000
 };
 
@@ -159,7 +161,7 @@ function normalizeWhisper(raw) {
   w.partialMs = Math.max(250, num(w.partialMs, WHISPER_DEFAULTS.partialMs));
   w.partialBeamSize = Math.min(5, Math.max(1, Math.round(num(w.partialBeamSize, 1))));
   w.finalBeamSize = Math.min(10, Math.max(1, Math.round(num(w.finalBeamSize, 5))));
-  w.minVoicedMs = Math.max(0, num(w.minVoicedMs, WHISPER_DEFAULTS.minVoicedMs));
+  w.vadFilter = w.vadFilter !== false && !['false', '0', 'off'].includes(String(w.vadFilter).toLowerCase());
   w.startupTimeoutMs = Math.max(5000, num(w.startupTimeoutMs, WHISPER_DEFAULTS.startupTimeoutMs));
   return w;
 }

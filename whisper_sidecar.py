@@ -134,6 +134,13 @@ class Engine:
         segments, _ = self.model.transcribe(silence, language=self.opts['language'], beam_size=1)
         for _ in segments:
             pass
+        # Silero loads its own ONNX session on first use - another 200 ms that
+        # would otherwise land on the first thing the user says.
+        segments, _ = self.model.transcribe(
+            silence, language=self.opts['language'], beam_size=1, vad_filter=True
+        )
+        for _ in segments:
+            pass
 
     def push(self, pcm):
         with self.lock:
@@ -148,27 +155,23 @@ class Engine:
             self.audio.clear()
             self.generation += 1
 
-    def voiced_ms(self, audio):
-        """Milliseconds of audio loud enough to be speech, measured the same way
-        the caller's endpointer measures it - RMS per 20 ms frame."""
-        frame = SAMPLE_RATE // 50
-        usable = len(audio) - (len(audio) % frame)
-        if usable <= 0:
-            return 0
-        frames = audio[:usable].reshape(-1, frame)
-        rms = self.np.sqrt((frames * frames).mean(axis=1))
-        return int((rms > self.opts['vadThreshold']).sum() * 20)
+    def tail_is_quiet(self, pcm, tail_ms=400, ratio=0.25):
+        """Whether the speaker has already stopped. Compares the tail against
+        the buffer as a whole rather than against a threshold, so it holds for
+        any microphone and any room - the caller's endpointer owns the absolute
+        numbers, and two places holding the same number is how they drift."""
+        audio = self.np.frombuffer(pcm, dtype=self.np.int16).astype(self.np.float32)
+        tail_n = int(SAMPLE_RATE * tail_ms / 1000)
+        if len(audio) < tail_n * 2:
+            return False
+        whole = float(self.np.sqrt((audio * audio).mean()))
+        tail = audio[-tail_n:]
+        return whole > 0 and float(self.np.sqrt((tail * tail).mean())) < whole * ratio
 
     def transcribe(self, pcm, beam_size, partial=False):
         if len(pcm) < SAMPLE_RATE:  # under 0.5 s of audio, nothing to say yet
             return ''
         audio = self.np.frombuffer(pcm, dtype=self.np.int16).astype(self.np.float32) / 32768.0
-        # Whisper does not return nothing for nothing: fed silence it invents a
-        # plausible sentence, and the one it invents in Hebrew is "תודה רבה".
-        # A buffer with no speech in it is the normal case at the end of a
-        # microphone press, so this is not an edge case - it is every press.
-        if self.voiced_ms(audio) < self.opts['minVoicedMs']:
-            return ''
         options = {}
         if partial:
             # Whisper's default temperature list is a fallback ladder: a decode
@@ -186,9 +189,20 @@ class Engine:
             # its own previous output is how a stuck loop starts.
             condition_on_previous_text=False,
             without_timestamps=True,
-            # The caller runs its own endpointer and hands over one utterance
-            # at a time, so a second voice-activity pass here only costs time.
-            vad_filter=False,
+            # Not a second endpointer - a different question. The caller's
+            # endpointer asks "did the level drop", which any quiet room
+            # answers wrong; Silero asks "was that a voice". Whisper does not
+            # return nothing for nothing: fed room noise it invents a sentence,
+            # and the one it invents in Hebrew is reliably "תודה רבה". Measured
+            # against noise at four levels, no_speech_prob came back 0.0 and
+            # avg_logprob looked like ordinary speech - this pass is the only
+            # thing that tells the two apart. It also PAYS for itself: a buffer
+            # with no voice in it skips the encoder, 30 ms instead of 600.
+            vad_filter=self.opts['vadFilter'],
+            # Silero's own default of 0.5 clips speech that trails off, and the
+            # cost of keeping a little noise is one wasted pass, not a wrong
+            # transcript.
+            vad_parameters={'threshold': 0.3, 'min_speech_duration_ms': 100},
         )
         return ' '.join(segment.text for segment in segments).strip()
 
@@ -205,6 +219,11 @@ def partial_loop(engine, stop, interval):
         last_len = len(pcm)
         # A commit is running: it owns the card, and this hypothesis is about to
         # be superseded by it anyway.
+        # The speaker has stopped: a commit is about to be asked for, this
+        # hypothesis would say what the last one already said, and starting it
+        # now only makes the commit queue behind half a second of decoding.
+        if engine.tail_is_quiet(pcm):
+            continue
         if engine.commit_wanted or not engine.infer_lock.acquire(blocking=False):
             continue
         if engine.commit_wanted:
@@ -235,11 +254,10 @@ def main():
     opts.setdefault('device', 'auto')
     opts.setdefault('computeType', 'auto')
     opts.setdefault('language', 'he')
-    opts.setdefault('partialMs', 700)
+    opts.setdefault('partialMs', 400)
     opts.setdefault('partialBeamSize', 1)
     opts.setdefault('finalBeamSize', 5)
-    opts.setdefault('vadThreshold', 0.005)
-    opts.setdefault('minVoicedMs', 200)
+    opts.setdefault('vadFilter', True)
 
     preload_cuda_libraries()
     started = time.perf_counter()

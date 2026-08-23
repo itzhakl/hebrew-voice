@@ -127,13 +127,10 @@ class WhisperProvider {
       language: o.languageCode || 'he',
       cacheDir: o.cacheDir || '',
       offline: !!o.offline,
-      partialMs: o.partialMs == null ? 700 : o.partialMs,
+      partialMs: o.partialMs == null ? 400 : o.partialMs,
       partialBeamSize: o.partialBeamSize == null ? 1 : o.partialBeamSize,
       finalBeamSize: o.finalBeamSize == null ? 5 : o.finalBeamSize,
-      // Same RMS floor the local endpointer uses, so "loud enough to commit"
-      // and "loud enough to transcribe" cannot disagree.
-      vadThreshold: o.vadThreshold == null ? 0.005 : o.vadThreshold,
-      minVoicedMs: o.minVoicedMs == null ? 200 : o.minVoicedMs
+      vadFilter: o.vadFilter !== false
     };
   }
 

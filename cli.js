@@ -2,7 +2,8 @@
 
 const { spawn } = require('child_process');
 const config = require('./config');
-const { Endpointer } = require('./vad');
+const vad = require('./vad');
+const { Endpointer } = vad;
 const {
   ElevenLabsProvider,
   parseElevenLabsCredential,
@@ -68,7 +69,6 @@ function buildProvider(cfg, log) {
       Object.assign({}, cfg.whisper, {
         languageCode: normalizeLanguage(cfg.language),
         settleTimeoutMs: cfg.settleTimeoutMs,
-        vadThreshold: cfg.vadThreshold,
         log
       })
     );
@@ -233,6 +233,7 @@ async function cmdStatus(cfg) {
     // With no server-side endpointer, these two numbers ARE the endpointing -
     // "it cuts me off" and "it never commits" both land here.
     console.log(`endpoint   local VAD: ${cfg.endpointMs}ms of silence commits, ${cfg.maxSegmentMs}ms caps a segment`);
+    console.log(`speech     room measured over the first 300ms, ${vad.DEFAULTS.noiseRatio}x above it counts as speech (floor ${cfg.vadThreshold}), Silero ${cfg.whisper.vadFilter ? 'on' : 'OFF'}`);
     return statusServers(cfg, found);
   }
 
