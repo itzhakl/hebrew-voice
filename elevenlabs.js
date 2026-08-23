@@ -176,6 +176,19 @@ class ElevenLabsProvider {
         const apiKey = parseElevenLabsCredential(this.opts.credential);
         const WebSocket = require('ws');
         const ws = new WebSocket(buildRealtimeUrl(this.opts), { headers: { 'xi-api-key': apiKey } });
+        // session_started is sent the instant the socket opens - before
+        // createSession, one await later, can attach its own handler. Without
+        // this buffer the server's echo of the config it actually resolved is
+        // dropped every single time, which is the one place a knob that looks
+        // ignored can be confirmed.
+        const early = [];
+        const buffer = (data) => early.push(data);
+        ws.on('message', buffer);
+        ws.drainEarly = (handler) => {
+          ws.removeListener('message', buffer);
+          const queued = early.splice(0, early.length);
+          for (const data of queued) handler(data);
+        };
         await new Promise((resolve, reject) => {
           const onOpen = () => {
             ws.removeListener('error', onError);
@@ -194,6 +207,7 @@ class ElevenLabsProvider {
   }
 
   async createSession(cb) {
+    const log = typeof this.opts.log === 'function' ? this.opts.log : () => {};
     const settleTimeoutMs = this.opts.settleTimeoutMs == null ? 3000 : this.opts.settleTimeoutMs;
     const chunkBytes = Math.max(1, Math.round((this.opts.chunkMs == null ? DEFAULT_CHUNK_MS : this.opts.chunkMs) * BYTES_PER_MS));
 
@@ -226,7 +240,7 @@ class ElevenLabsProvider {
       );
     };
 
-    socket.on('message', (raw) => {
+    const onMessage = (raw) => {
       let msg;
       try {
         msg = JSON.parse(raw.toString());
@@ -235,6 +249,12 @@ class ElevenLabsProvider {
       }
       const type = msg && msg.message_type;
       const text = String((msg && msg.text) || '').trim();
+      // The server echoes the config it actually resolved. A knob that looks
+      // ignored is almost always a knob the query string never carried.
+      if (type === 'session_started') {
+        log(`session_started ${JSON.stringify(msg)}`);
+        return;
+      }
       if (type === 'partial_transcript' || type === 'final_transcript') {
         // final_transcript is a settled hypothesis, not a commit. Emitting it
         // as one too would send the same words twice - committed_transcript is
@@ -255,14 +275,20 @@ class ElevenLabsProvider {
       if (ERROR_TYPES.has(type)) {
         if (RECOVERABLE_TYPES.has(type)) {
           // A throttled commit is answered by the server's own VAD a moment
-          // later, and painting TranscriptError over live text loses it.
+          // later, and painting TranscriptError over live text loses it. But a
+          // run of insufficient_audio_activity is speech the server never
+          // heard, which reads to the user as dictation ignoring them - so it
+          // has to be visible somewhere rather than swallowed here.
+          log(`dropped ${type}: ${String((msg && msg.error) || '').slice(0, 200)}`);
           awaitingCommit = false;
           return;
         }
         dead = true;
         cb.onError(mapElevenLabsError(msg));
       }
-    });
+    };
+    socket.on('message', onMessage);
+    if (typeof socket.drainEarly === 'function') socket.drainEarly(onMessage);
     socket.on('error', (e) => {
       dead = true;
       cb.onError(mapElevenLabsError(e));

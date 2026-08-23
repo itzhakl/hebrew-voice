@@ -26,6 +26,10 @@ const DEFAULTS = {
   filterBackgroundAudio: false,
   // null leaves the server on its own 1.5 s. Lower commits sooner mid-sentence.
   vadSilenceThresholdSecs: null,
+  // How long endSegment waits for the commit the engine still owes us. The
+  // client's hard budget after CloseStream is 5000 ms, so this must leave room
+  // for the socket to close inside it.
+  settleTimeoutMs: 3000,
   port: 8765,
   vadThreshold: 0.005,
   endpointMs: 600,
@@ -93,6 +97,7 @@ function load(overrides = {}, env = process.env, file = configPath()) {
   cfg.secondaryLanguages = toList(cfg.secondaryLanguages);
   cfg.keyterms = toList(cfg.keyterms);
   cfg.noVerbatim = bool(cfg.noVerbatim);
+  cfg.settleTimeoutMs = Math.min(4500, Math.max(500, num(cfg.settleTimeoutMs, DEFAULTS.settleTimeoutMs)));
   cfg.filterBackgroundAudio = bool(cfg.filterBackgroundAudio);
   // The server rejects anything outside 0.3-3.0 rather than clamping it.
   cfg.vadSilenceThresholdSecs =

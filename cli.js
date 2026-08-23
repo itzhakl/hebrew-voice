@@ -59,7 +59,7 @@ function parse(argv) {
   return opts;
 }
 
-function buildProvider(cfg) {
+function buildProvider(cfg, log) {
   // Fail fast on a missing or wrong-vendor key instead of erroring on the
   // first mic press, when the failure is invisible behind Claude's UI.
   parseElevenLabsCredential(cfg.credential);
@@ -73,14 +73,16 @@ function buildProvider(cfg) {
     keyterms: cfg.keyterms,
     noVerbatim: cfg.noVerbatim,
     filterBackgroundAudio: cfg.filterBackgroundAudio,
-    vadSilenceThresholdSecs: cfg.vadSilenceThresholdSecs
+    vadSilenceThresholdSecs: cfg.vadSilenceThresholdSecs,
+    settleTimeoutMs: cfg.settleTimeoutMs,
+    log
   });
 }
 
 function serverOptions(cfg, verbose) {
   return {
     port: cfg.port,
-    provider: buildProvider(cfg),
+    provider: buildProvider(cfg, verbose ? (m) => console.error(`[scribe] ${m}`) : undefined),
     makeEndpointer: () =>
       new Endpointer({
         vadThreshold: cfg.vadThreshold,
@@ -167,6 +169,10 @@ async function cmdStatus(cfg) {
   console.log(`provider   ${cfg.provider} (${cfg.model}, ${normalizeLanguage(cfg.language)})`);
   const secondary = cfg.secondaryLanguages.map(normalizeLanguage).filter((c) => c && c !== normalizeLanguage(cfg.language));
   console.log(`languages  ${normalizeLanguage(cfg.language)}${secondary.length ? ` + ${secondary.join(' ')}` : ' only'}`);
+  // The knobs that decide whether speech is heard at all, and how long a pause
+  // may be before the sentence is cut - the two things a user reports as
+  // "it does not pick me up" and "it cuts me off".
+  console.log(`audio      silence ${cfg.vadSilenceThresholdSecs == null ? 'server default (1.5s)' : `${cfg.vadSilenceThresholdSecs}s`}, background filter ${cfg.filterBackgroundAudio ? 'on' : 'off'}, no-verbatim ${cfg.noVerbatim ? 'on' : 'off'}`);
   // Silently dropped keyterms would otherwise look like the model ignoring them.
   const terms = keytermList(cfg.keyterms);
   if (cfg.keyterms.length) {

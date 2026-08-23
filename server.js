@@ -66,10 +66,17 @@ function handleConnection(ws, opts) {
   // utterance whose final never lands would vanish in front of the user.
   let unfinalised = '';
 
+  // Time-to-first-ink is the whole felt latency of dictation: an engine that
+  // streams partials paints grey text while you talk, and one that only speaks
+  // at commit leaves the screen empty until its endpointer fires. The two feel
+  // nothing alike at the same accuracy, so both are timed here.
+  let firstInterimAt = 0;
+  let interims = 0;
+
   const emit = (text, why) => {
     const clean = stripBidiControls(text);
     if (!clean) return;
-    log(`${why}: ${clean.length} chars`);
+    log(`${why}: ${clean.length} chars, ${Date.now() - openedAt}ms after mic start, ${interims} interims so far`);
     send({ type: 'TranscriptText', data: clean });
     send({ type: 'TranscriptEndpoint' });
     unfinalised = '';
@@ -81,6 +88,11 @@ function handleConnection(ws, opts) {
       // client - both only replace its pending buffer - but naming the grey
       // hypothesis correctly is free and survives the two diverging.
       onInterim: (text) => {
+        interims++;
+        if (!firstInterimAt) {
+          firstInterimAt = Date.now();
+          log(`first interim ${firstInterimAt - openedAt}ms after mic start`);
+        }
         unfinalised = text;
         send({ type: 'TranscriptInterim', data: stripBidiControls(text) });
       },
