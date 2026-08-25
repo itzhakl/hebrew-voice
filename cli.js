@@ -17,15 +17,15 @@ const server = require('./server');
 
 const ENV_VAR = 'VOICE_STREAM_BASE_URL';
 
-const USAGE = `rtl-caret voice - Hebrew dictation for Claude Code's terminal /voice
+const USAGE = `hebrew-voice - Hebrew dictation for Claude Code's terminal /voice
 
-  rtl-caret voice -- <command...>   run a command with dictation redirected here
-  rtl-caret voice serve             run the server in the foreground
-  rtl-caret voice status            report whether a server is reachable
-  rtl-caret voice env               print the export line for an existing server
-  rtl-caret voice setup             store the ElevenLabs API key
-  rtl-caret voice test [seconds]    record from the microphone and transcribe
-  rtl-caret voice levels [seconds]  measure this microphone: room, speech, bar
+  hebrew-voice -- <command...>   run a command with dictation redirected here
+  hebrew-voice serve             run the server in the foreground
+  hebrew-voice status            report whether a server is reachable
+  hebrew-voice env               print the export line for an existing server
+  hebrew-voice setup             store the ElevenLabs API key
+  hebrew-voice test [seconds]    record from the microphone and transcribe
+  hebrew-voice levels [seconds]  measure this microphone: room, speech, bar
 
   --port <n>       port to bind or probe (default 8765)
   --provider <p>   elevenlabs (cloud Scribe) or whisper (local faster-whisper)
@@ -136,10 +136,10 @@ async function scan(port, attempts = 10) {
 async function cmdServe(cfg, verbose) {
   const { server: instance, port, adopted } = await server.startWithPortFallback(serverOptions(cfg, verbose));
   if (adopted) {
-    console.error(`another rtl-caret voice server already owns ${baseUrl(port)}`);
+    console.error(`another hebrew-voice server already owns ${baseUrl(port)}`);
     return 0;
   }
-  console.error(`rtl-caret voice on ${baseUrl(port)}  (${engineLabel(cfg)})`);
+  console.error(`hebrew-voice on ${baseUrl(port)}  (${engineLabel(cfg)})`);
   console.error(`export ${ENV_VAR}=${baseUrl(port)}`);
   // The local model takes seconds to load. A service that waits for the first
   // microphone press to find that out spends them in front of the user.
@@ -199,7 +199,7 @@ function statusServers(cfg, found) {
 
   if (!found.length) {
     console.log(`server     none on ${cfg.port}..${cfg.port + 9}`);
-    console.log('           dictation runs for as long as "rtl-caret voice -- <command>" does');
+    console.log('           dictation runs for as long as "hebrew-voice -- <command>" does');
     return 1;
   }
   for (const f of found) {
@@ -223,7 +223,7 @@ async function cmdStatus(cfg) {
     console.log('credential not needed - whisper runs on this machine');
     console.log(`python     ${python}${python === venvPython() ? '' : '  (not the rtl-caret venv)'}`);
   } else {
-    console.log(`credential ${cfg.credential ? 'set' : 'MISSING - run: rtl-caret voice setup'}`);
+    console.log(`credential ${cfg.credential ? 'set' : 'MISSING - run: hebrew-voice setup'}`);
   }
   console.log(`provider   ${cfg.provider} (${engineLabel(cfg)})`);
 
@@ -236,7 +236,7 @@ async function cmdStatus(cfg) {
     // "it cuts me off" and "it never commits" both land here.
     console.log(`endpoint   local VAD: ${cfg.endpointMs}ms of silence commits, ${cfg.maxSegmentMs}ms caps a segment`);
     console.log(`speech     room measured over the first 300ms, ${cfg.vadNoiseRatio}x above it counts as speech (floor ${cfg.vadThreshold}), Silero ${cfg.whisper.vadFilter ? 'on' : 'OFF'}`);
-    console.log('           run "rtl-caret voice levels" if pauses never commit');
+    console.log('           run "hebrew-voice levels" if pauses never commit');
     return statusServers(cfg, found);
   }
 
@@ -258,7 +258,7 @@ async function cmdStatus(cfg) {
 async function cmdEnv(cfg) {
   const port = await findRunning(cfg.port);
   if (port === null) {
-    console.error('no rtl-caret voice server running - start one with: rtl-caret voice serve');
+    console.error('no hebrew-voice server running - start one with: hebrew-voice serve');
     return 1;
   }
   console.log(`export ${ENV_VAR}=${baseUrl(port)}`);
@@ -483,7 +483,7 @@ async function run(argv) {
   } catch (e) {
     console.error(e.message || String(e));
     if (e.hint === 'set-api-key' && !e.message.includes('voice setup')) {
-      console.error('run: rtl-caret voice setup');
+      console.error('run: hebrew-voice setup');
     }
     return 1;
   }

@@ -74,17 +74,17 @@ function normalizeLanguage(code) {
 function parseElevenLabsCredential(raw) {
   const trimmed = String(raw || '').trim();
   if (!trimmed) {
-    throw sttError('No ElevenLabs API key - run: rtl-caret voice setup', 'set-api-key');
+    throw sttError('No ElevenLabs API key - run: hebrew-voice setup', 'set-api-key');
   }
   if (trimmed.startsWith('{')) {
     throw sttError(
-      'That is a Google Cloud service-account JSON, not an ElevenLabs API key - run: rtl-caret voice setup',
+      'That is a Google Cloud service-account JSON, not an ElevenLabs API key - run: hebrew-voice setup',
       'set-api-key'
     );
   }
   if (/^AIza/.test(trimmed)) {
     throw sttError(
-      'That is a Google Cloud API key, not an ElevenLabs API key - run: rtl-caret voice setup',
+      'That is a Google Cloud API key, not an ElevenLabs API key - run: hebrew-voice setup',
       'set-api-key'
     );
   }

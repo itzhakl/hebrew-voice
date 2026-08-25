@@ -64,7 +64,7 @@ const DEFAULTS = {
   // How much louder than the measured room speech has to be. Three is about
   // 10 dB and suits a headset; a laptop microphone with its gain wound up
   // hears itself almost as loudly as it hears you, and needs less.
-  // `rtl-caret voice levels` measures both and names the number.
+  // `hebrew-voice levels` measures both and names the number.
   vadNoiseRatio: 3,
   endpointMs: 600,
   maxSegmentMs: 12000,
