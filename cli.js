@@ -426,7 +426,21 @@ async function cmdLevels(cfg, seconds) {
   const loud = pct(levels, 0.9);
   const bar = Math.max(cfg.vadThreshold, room * cfg.vadNoiseRatio);
 
+  // Where the level sits second by second. A microphone that opens loud and
+  // settles has a room that cannot be measured from the first frames, and that
+  // is invisible in any single number.
+  const BUCKET = 25; // 500 ms
+  const timeline = [];
+  for (let i = 0; i + BUCKET <= levels.length; i += BUCKET) {
+    timeline.push(pct(levels.slice(i, i + BUCKET), 0.5));
+  }
+  const top = Math.max(...timeline) || 1;
   console.log(`frames     ${levels.length} (${(levels.length * 20) / 1000}s)`);
+  console.log('timeline   median per 500ms, loudest bar is the loudest half-second');
+  timeline.forEach((v, i) => {
+    const bar = '#'.repeat(Math.max(1, Math.round((v / top) * 40)));
+    console.log(`  ${String((i * BUCKET * 20) / 1000).padStart(5)}s ${f(v)} ${bar}`);
+  });
   console.log(`room       ${f(room)}   median of the quiet opening`);
   console.log(`speech     ${f(pct(levels, 0.5))} median, ${f(loud)} at the 90th, ${f(Math.max(...levels))} peak`);
   console.log(`headroom   speech sits ${(loud / (room || 1e-9)).toFixed(1)}x over the room`);
