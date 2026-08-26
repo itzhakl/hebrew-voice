@@ -31,7 +31,12 @@ const WHISPER_DEFAULTS = {
   // Silero in front of the decoder. Fed room noise, Whisper does not return
   // nothing - it invents a sentence. Off only if it ever eats quiet speech.
   vadFilter: true,
-  startupTimeoutMs: 120000
+  startupTimeoutMs: 120000,
+  // The model is ~1.3 GB resident and a desktop that dictates twice a day
+  // pays for it around the clock - swapped out, so the next press waits on
+  // the disk anyway. Unloading after a quiet stretch trades that for a
+  // reload the user asked for. 0 keeps the old always-resident behaviour.
+  idleUnloadMs: 600000
 };
 
 const DEFAULTS = {
@@ -169,6 +174,10 @@ function normalizeWhisper(raw) {
   w.finalBeamSize = Math.min(10, Math.max(1, Math.round(num(w.finalBeamSize, 5))));
   w.vadFilter = w.vadFilter !== false && !['false', '0', 'off'].includes(String(w.vadFilter).toLowerCase());
   w.startupTimeoutMs = Math.max(5000, num(w.startupTimeoutMs, WHISPER_DEFAULTS.startupTimeoutMs));
+  // Anything under a minute would unload between two sentences of the same
+  // thought; 0 is the explicit opt-out and must survive the floor.
+  const idle = num(w.idleUnloadMs, WHISPER_DEFAULTS.idleUnloadMs);
+  w.idleUnloadMs = idle <= 0 ? 0 : Math.max(60000, idle);
   return w;
 }
 

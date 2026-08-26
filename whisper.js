@@ -116,6 +116,7 @@ class WhisperProvider {
     this.pending = new Map();
     this.commitSeq = 0;
     this.stderrTail = [];
+    this.idleTimer = null;
   }
 
   sidecarOptions() {
@@ -147,6 +148,7 @@ class WhisperProvider {
   /* Resolves once the model is loaded and warmed. Every caller shares the one
    * load; a failed load clears itself so the next microphone press retries. */
   _ensure() {
+    this._cancelIdle();
     if (this.starting) return this.starting;
     this.starting = new Promise((resolve, reject) => {
       let proc;
@@ -264,6 +266,7 @@ class WhisperProvider {
   /* The process is gone: every commit still waiting for it must resolve rather
    * than hang until the client's 5000 ms safety timer fires. */
   _teardown() {
+    this._cancelIdle();
     this.proc = null;
     this.starting = null;
     this.info = null;
@@ -295,6 +298,7 @@ class WhisperProvider {
 
   async createSession(cb) {
     await this._ensure();
+    this._cancelIdle();
     const settleTimeoutMs = this.opts.settleTimeoutMs == null ? 3000 : this.opts.settleTimeoutMs;
     const session = { cb, closed: false };
     this.session = session;
@@ -334,11 +338,13 @@ class WhisperProvider {
         return text;
       },
       // The microphone stopped, not the engine: the model stays loaded so the
-      // next press costs nothing, and only the audio buffer is dropped.
+      // next press costs nothing, and only the audio buffer is dropped. It is
+      // only after whisper.idleUnloadMs of quiet that the model is given up.
       close: async () => {
         session.closed = true;
         if (this.session === session) this.session = null;
         this._command({ cmd: 'reset' });
+        this._armIdle();
       }
     };
   }
@@ -347,6 +353,35 @@ class WhisperProvider {
    * load at startup, not on the first microphone press. */
   preload() {
     return this._ensure();
+  }
+
+  idleUnloadMs() {
+    const n = Number(this.opts.idleUnloadMs);
+    return Number.isFinite(n) && n > 0 ? n : 0;
+  }
+
+  _cancelIdle() {
+    if (!this.idleTimer) return;
+    clearTimeout(this.idleTimer);
+    this.idleTimer = null;
+  }
+
+  /* The microphone stopped and the model is idle. Hold it for one quiet stretch
+   * in case the user is only drawing breath, then give the memory back.
+   * Unref'd: a pending unload is not work the process owes anyone, and it must
+   * never be the reason a one-shot CLI run refuses to exit. */
+  _armIdle() {
+    this._cancelIdle();
+    const ms = this.idleUnloadMs();
+    if (!ms || !this.proc) return;
+    this.idleTimer = setTimeout(() => {
+      this.idleTimer = null;
+      // A session opened while the timer was in flight owns the model again.
+      if (this.session && !this.session.closed) return;
+      this.log(`unloading the model after ${ms}ms idle`);
+      this.shutdown();
+    }, ms);
+    if (this.idleTimer.unref) this.idleTimer.unref();
   }
 
   /* Ends the sidecar process. Only the server's own shutdown wants this. */
