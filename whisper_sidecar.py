@@ -173,6 +173,12 @@ class Engine:
             return ''
         audio = self.np.frombuffer(pcm, dtype=self.np.int16).astype(self.np.float32) / 32768.0
         options = {}
+        # Terminal Hebrew is code-switched: "git", "npm", a library name arrive
+        # mid-sentence and come back transliterated into Hebrew letters. The
+        # list biases the decoder at them. Passed only when non-empty - an empty
+        # string here is a prompt, not an absence, and it costs a decode.
+        if self.opts.get('hotwords'):
+            options['hotwords'] = ' '.join(self.opts['hotwords'])
         if partial:
             # Whisper's default temperature list is a fallback ladder: a decode
             # whose logprob or compression ratio looks wrong is retried at 0.2,
@@ -258,6 +264,7 @@ def main():
     opts.setdefault('partialBeamSize', 1)
     opts.setdefault('finalBeamSize', 5)
     opts.setdefault('vadFilter', True)
+    opts.setdefault('hotwords', [])
 
     preload_cuda_libraries()
     started = time.perf_counter()

@@ -131,7 +131,10 @@ class WhisperProvider {
       partialMs: o.partialMs == null ? 400 : o.partialMs,
       partialBeamSize: o.partialBeamSize == null ? 1 : o.partialBeamSize,
       finalBeamSize: o.finalBeamSize == null ? 5 : o.finalBeamSize,
-      vadFilter: o.vadFilter !== false
+      vadFilter: o.vadFilter !== false,
+      // Scribe takes these as query parameters; Whisper takes them as a decoder
+      // prompt. Same list in voice.json, two very different wires.
+      hotwords: Array.isArray(o.keyterms) ? o.keyterms : []
     };
   }
 
@@ -230,10 +233,21 @@ class WhisperProvider {
       clearTimeout(startup.timer);
       this.info = msg;
       this.log(`sidecar ready: ${msg.model} on ${msg.device}/${msg.computeType} in ${msg.loadMs}ms`);
+      // A card that was there yesterday and is full today gives the same
+      // dictation, three times slower, with no sign of why. The fallback is
+      // deliberate and must stay - but it is not something to find out about
+      // by reading a --verbose log.
+      if (msg.device === 'cpu' && (this.opts.device || 'auto') !== 'cpu') {
+        console.error(
+          '[whisper] running on CPU, not the GPU - transcription will be several times slower.'
+        );
+        console.error('[whisper] usually the card is out of memory; "nvidia-smi" names what holds it.');
+      }
       startup.resolve(msg);
       return;
     }
     if (msg.type === 'warning') {
+      console.error(`[whisper] ${msg.message}`);
       this.log(`sidecar warning: ${msg.message}`);
       return;
     }

@@ -70,6 +70,7 @@ function buildProvider(cfg, log) {
       Object.assign({}, cfg.whisper, {
         languageCode: normalizeLanguage(cfg.language),
         settleTimeoutMs: cfg.settleTimeoutMs,
+        keyterms: keytermList(cfg.keyterms),
         log
       })
     );
@@ -232,6 +233,8 @@ async function cmdStatus(cfg) {
     // it on its own; there is no secondary-language list to report.
     console.log(`languages  ${normalizeLanguage(cfg.language)}`);
     console.log(`decoding   partials every ${cfg.whisper.partialMs}ms at beam ${cfg.whisper.partialBeamSize}, commit at beam ${cfg.whisper.finalBeamSize}`);
+    const hot = keytermList(cfg.keyterms);
+    console.log(`hotwords   ${hot.length ? `${hot.length}: ${hot.join(', ')}` : 'none - set "keyterms" in voice.json'}`);
     // With no server-side endpointer, these two numbers ARE the endpointing -
     // "it cuts me off" and "it never commits" both land here.
     console.log(`endpoint   local VAD: ${cfg.endpointMs}ms of silence commits, ${cfg.maxSegmentMs}ms caps a segment`);
