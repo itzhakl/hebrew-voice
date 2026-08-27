@@ -235,6 +235,8 @@ async function cmdStatus(cfg) {
     console.log(`decoding   partials every ${cfg.whisper.partialMs}ms at beam ${cfg.whisper.partialBeamSize}, commit at beam ${cfg.whisper.finalBeamSize}`);
     const hot = keytermList(cfg.keyterms);
     console.log(`hotwords   ${hot.length ? `${hot.length}: ${hot.join(', ')}` : 'none - set "keyterms" in voice.json'}`);
+    const prompt = cfg.whisper.initialPrompt;
+    console.log(`style      ${prompt ? `"${prompt}"` : 'none - English will come back transliterated'}`);
     // With no server-side endpointer, these two numbers ARE the endpointing -
     // "it cuts me off" and "it never commits" both land here.
     console.log(`endpoint   local VAD: ${cfg.endpointMs}ms of silence commits, ${cfg.maxSegmentMs}ms caps a segment`);

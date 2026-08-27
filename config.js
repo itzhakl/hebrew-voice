@@ -31,6 +31,13 @@ const WHISPER_DEFAULTS = {
   // Silero in front of the decoder. Fed room noise, Whisper does not return
   // nothing - it invents a sentence. Off only if it ever eats quiet speech.
   vadFilter: true,
+  // Whisper's hotwords list biases the decoder at named terms; this biases it
+  // at a WAY OF WRITING. ivrit-ai learned Hebrew transcripts where English is
+  // transliterated, so "git commit" comes back "גיט קומית" however many times
+  // the words appear in hotwords. One example sentence in the target style
+  // fixes terms that are not in any list - measured: "dev" and "deployment"
+  // came back in Latin without ever being named.
+  initialPrompt: 'תעשה git commit ואז push ל-branch, ואז תריץ את ה-deployment עם docker ו-npm.',
   startupTimeoutMs: 120000,
   // The model is ~1.3 GB resident and a desktop that dictates twice a day
   // pays for it around the clock - swapped out, so the next press waits on
@@ -164,6 +171,7 @@ function normalizeWhisper(raw) {
   w.model = String(w.model || '').trim() || WHISPER_DEFAULTS.model;
   w.device = oneOf(w.device, ['auto', 'cuda', 'cpu'], 'auto');
   w.computeType = String(w.computeType || '').trim() || 'auto';
+  w.initialPrompt = w.initialPrompt == null ? '' : String(w.initialPrompt).trim();
   w.python = String(w.python || '').trim();
   w.cacheDir = String(w.cacheDir || '').trim();
   w.offline = bool(w.offline);

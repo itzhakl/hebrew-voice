@@ -134,7 +134,8 @@ class WhisperProvider {
       vadFilter: o.vadFilter !== false,
       // Scribe takes these as query parameters; Whisper takes them as a decoder
       // prompt. Same list in voice.json, two very different wires.
-      hotwords: Array.isArray(o.keyterms) ? o.keyterms : []
+      hotwords: Array.isArray(o.keyterms) ? o.keyterms : [],
+      initialPrompt: o.initialPrompt == null ? '' : String(o.initialPrompt)
     };
   }
 

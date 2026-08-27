@@ -179,6 +179,10 @@ class Engine:
         # string here is a prompt, not an absence, and it costs a decode.
         if self.opts.get('hotwords'):
             options['hotwords'] = ' '.join(self.opts['hotwords'])
+        # The stronger of the two, and they do not overlap: hotwords names
+        # terms, this names a way of writing them.
+        if self.opts.get('initialPrompt'):
+            options['initial_prompt'] = self.opts['initialPrompt']
         if partial:
             # Whisper's default temperature list is a fallback ladder: a decode
             # whose logprob or compression ratio looks wrong is retried at 0.2,
@@ -265,6 +269,7 @@ def main():
     opts.setdefault('finalBeamSize', 5)
     opts.setdefault('vadFilter', True)
     opts.setdefault('hotwords', [])
+    opts.setdefault('initialPrompt', '')
 
     preload_cuda_libraries()
     started = time.perf_counter()
