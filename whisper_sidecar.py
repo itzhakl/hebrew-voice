@@ -337,8 +337,20 @@ def main():
             break
 
     stop.set()
+    # The worker may be mid-decode: dropping the model out from under it, or
+    # letting CUDA tear its context down while a kernel is still queued, throws
+    # a std::runtime_error from C++ and the process aborts instead of exiting.
+    worker.join(timeout=10)
+    with engine.infer_lock:
+        engine.model = None
     return 0
 
 
 if __name__ == '__main__':
-    sys.exit(main())
+    code = main()
+    sys.stdout.flush()
+    sys.stderr.flush()
+    # CTranslate2 frees its CUDA allocations from a static destructor that runs
+    # after the interpreter is already torn down, which aborts. Nothing else is
+    # owed at this point, so the process leaves before that can happen.
+    os._exit(code)
