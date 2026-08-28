@@ -24,6 +24,10 @@ const WHISPER_DEFAULTS = {
   // A hypothesis costs one pass, ~470 ms, and the card is idle between them.
   // The cadence the user reads is this plus that pass.
   partialMs: 400,
+  // The hypothesis model. Empty means the accurate model does both jobs. The
+  // encoder cost is flat and dominates a hypothesis, so the only way under it
+  // is a smaller model - the commit corrects whatever it got wrong.
+  partialModel: '',
   // A hypothesis that will be replaced in under a second does not earn a beam
   // search; the commit does.
   partialBeamSize: 1,
@@ -171,6 +175,7 @@ function normalizeWhisper(raw) {
   w.model = String(w.model || '').trim() || WHISPER_DEFAULTS.model;
   w.device = oneOf(w.device, ['auto', 'cuda', 'cpu'], 'auto');
   w.computeType = String(w.computeType || '').trim() || 'auto';
+  w.partialModel = String(w.partialModel || '').trim();
   w.initialPrompt = w.initialPrompt == null ? '' : String(w.initialPrompt).trim();
   w.python = String(w.python || '').trim();
   w.cacheDir = String(w.cacheDir || '').trim();

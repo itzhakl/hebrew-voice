@@ -128,6 +128,7 @@ class WhisperProvider {
       language: o.languageCode || 'he',
       cacheDir: o.cacheDir || '',
       offline: !!o.offline,
+      partialModel: o.partialModel || '',
       partialMs: o.partialMs == null ? 400 : o.partialMs,
       partialBeamSize: o.partialBeamSize == null ? 1 : o.partialBeamSize,
       finalBeamSize: o.finalBeamSize == null ? 5 : o.finalBeamSize,
@@ -233,7 +234,8 @@ class WhisperProvider {
     if (msg.type === 'ready') {
       clearTimeout(startup.timer);
       this.info = msg;
-      this.log(`sidecar ready: ${msg.model} on ${msg.device}/${msg.computeType} in ${msg.loadMs}ms`);
+      const hyp = msg.partialModel ? `, hypotheses on ${msg.partialModel}` : '';
+      this.log(`sidecar ready: ${msg.model} on ${msg.device}/${msg.computeType}${hyp} in ${msg.loadMs}ms`);
       // A card that was there yesterday and is full today gives the same
       // dictation, three times slower, with no sign of why. The fallback is
       // deliberate and must stay - but it is not something to find out about

@@ -28,6 +28,7 @@ import time
 
 SAMPLE_RATE = 16000
 HEADER = struct.Struct('>BI')
+MIN_PARTIAL_BYTES = SAMPLE_RATE * 2 // 5  # 0.2 s of int16 PCM
 TYPE_AUDIO = 0
 TYPE_COMMAND = 1
 
@@ -101,6 +102,20 @@ class Engine:
             self.device = 'cpu'
             self.compute_type = resolve_compute_type(opts.get('computeType'), 'cpu')
             self.model = self._load(self.device, self.compute_type)
+        # A hypothesis is thrown away the moment the next one lands, so it does
+        # not need the accurate model - it needs a fast one. The encoder cost is
+        # flat and it dominates, so a smaller model is the only way under it:
+        # measured, large-v3-turbo hypothesises in ~550 ms and small in ~120.
+        # The commit still runs on the accurate model and corrects it. Optional,
+        # and a load that fails leaves the accurate model doing both jobs rather
+        # than leaving the user with no dictation.
+        self.partial_model = None
+        name = str(opts.get('partialModel') or '').strip()
+        if name and name != opts['model']:
+            try:
+                self.partial_model = self._load(self.device, self.compute_type, name)
+            except Exception as e:
+                emit(type='warning', message=f'partial model {name} unavailable ({type(e).__name__}: {e})')
         self.lock = threading.Lock()
         # Set the moment a commit arrives, before it queues for the card, so a
         # hypothesis that has not started yet gives up its turn instead of
@@ -115,11 +130,11 @@ class Engine:
         # when the utterance ended cannot publish itself over the next one.
         self.generation = 0
 
-    def _load(self, device, compute_type):
+    def _load(self, device, compute_type, name=None):
         from faster_whisper import WhisperModel
 
         return WhisperModel(
-            self.opts['model'],
+            name or self.opts['model'],
             device=device,
             compute_type=compute_type,
             download_root=self.opts.get('cacheDir') or None,
@@ -131,9 +146,10 @@ class Engine:
         the tokenizer. Paying it here means the first thing the user says is not
         the slowest thing they say."""
         silence = self.np.zeros(SAMPLE_RATE, dtype=self.np.float32)
-        segments, _ = self.model.transcribe(silence, language=self.opts['language'], beam_size=1)
-        for _ in segments:
-            pass
+        for model in filter(None, (self.model, self.partial_model)):
+            segments, _ = model.transcribe(silence, language=self.opts['language'], beam_size=1)
+            for _ in segments:
+                pass
         # Silero loads its own ONNX session on first use - another 200 ms that
         # would otherwise land on the first thing the user says.
         segments, _ = self.model.transcribe(
@@ -169,7 +185,13 @@ class Engine:
         return whole > 0 and float(self.np.sqrt((tail * tail).mean())) < whole * ratio
 
     def transcribe(self, pcm, beam_size, partial=False):
-        if len(pcm) < SAMPLE_RATE:  # under 0.5 s of audio, nothing to say yet
+        # A hypothesis is allowed on less audio than a commit. Nothing appears
+        # on screen until the first one lands, and the wait for it is this
+        # floor plus a decode - so half a second here is half a second of the
+        # user talking to a screen that has not moved. A commit keeps the
+        # longer floor: it is the text that stays.
+        floor = MIN_PARTIAL_BYTES if partial else SAMPLE_RATE
+        if len(pcm) < floor:
             return ''
         audio = self.np.frombuffer(pcm, dtype=self.np.int16).astype(self.np.float32) / 32768.0
         options = {}
@@ -190,7 +212,8 @@ class Engine:
             # retry is another full pass - measured 470 ms turning into 1900.
             # A hypothesis about to be replaced is not worth five passes.
             options['temperature'] = 0.0
-        segments, _ = self.model.transcribe(
+        model = self.partial_model if partial and self.partial_model else self.model
+        segments, _ = model.transcribe(
             audio,
             language=self.opts['language'],
             beam_size=beam_size,
@@ -265,6 +288,7 @@ def main():
     opts.setdefault('computeType', 'auto')
     opts.setdefault('language', 'he')
     opts.setdefault('partialMs', 400)
+    opts.setdefault('partialModel', '')
     opts.setdefault('partialBeamSize', 1)
     opts.setdefault('finalBeamSize', 5)
     opts.setdefault('vadFilter', True)
@@ -282,6 +306,7 @@ def main():
     emit(
         type='ready',
         model=opts['model'],
+        partialModel=(opts['partialModel'] if engine.partial_model else ''),
         device=engine.device,
         computeType=engine.compute_type,
         language=opts['language'],
@@ -343,6 +368,7 @@ def main():
     worker.join(timeout=10)
     with engine.infer_lock:
         engine.model = None
+        engine.partial_model = None
     return 0
 
 
