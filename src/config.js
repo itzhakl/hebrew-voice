@@ -21,7 +21,7 @@ const FAST_PROVIDERS = new Set(['gemini', 'elevenlabs', 'whisper']);
 const ACCURATE_PROVIDERS = new Set(['gemini-transcribe']);
 
 const HYBRID_DEFAULTS = {
-  fast: 'elevenlabs',
+  fast: 'gemini',
   accurate: 'gemini-transcribe',
   accurateModel: DEFAULT_TRANSCRIBE_MODEL,
   // null means "whatever fits inside settleTimeoutMs".

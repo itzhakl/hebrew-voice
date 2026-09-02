@@ -14,12 +14,22 @@
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+/* An accurate engine that has failed this many times running is not having a
+ * bad minute - it is misconfigured, out of quota, or not enabled on the key.
+ * Waiting for it on every commit after that is paying its deadline for
+ * nothing, which the user feels as dictation that lands late. */
+const MAX_CONSECUTIVE_FAILURES = 3;
+
 class HybridProvider {
   constructor(fast, accurate, opts = {}) {
     this.id = 'hybrid';
     this.fast = fast;
     this.accurate = accurate;
     this.opts = opts;
+    // Provider-level, not session-level: one mic press is one session, and a
+    // dead engine has to be remembered across presses to be worth anything.
+    this.consecutiveFailures = 0;
+    this.accurateDropped = false;
   }
 
   async createSession(cb) {
@@ -36,6 +46,7 @@ class HybridProvider {
     let accurateFailed = false;
     let flushed = false;
 
+    const useAccurate = !this.accurateDropped;
     const [fastSession, accurateSession] = await Promise.all([
       this.fast.createSession({
         onInterim: (t) => {
@@ -50,34 +61,43 @@ class HybridProvider {
         },
         onError: cb.onError
       }),
-      this.accurate.createSession({
-        onInterim: () => {},
-        // A failed accurate engine must not blank the segment - it only means
-        // the fast engine's text is the best we hold.
-        onError: (e) => {
-          accurateFailed = true;
-          accurateDone = true;
-          log(`accurate engine failed, falling back: ${e && e.message}`);
-        },
-        onClosed: () => {
-          accurateDone = true;
-        }
-      })
+      useAccurate
+        ? this.accurate.createSession({
+            onInterim: () => {},
+            // A failed accurate engine must not blank the segment - it only
+            // means the fast engine's text is the best we hold.
+            onError: (e) => {
+              accurateFailed = true;
+              accurateDone = true;
+              log(`accurate engine failed, falling back: ${e && e.message}`);
+            },
+            onClosed: () => {
+              accurateDone = true;
+            }
+          })
+        : null
     ]);
 
     return {
       sendAudio: (pcm) => {
         fastSession.sendAudio(pcm);
-        accurateSession.sendAudio(pcm);
+        if (accurateSession) accurateSession.sendAudio(pcm);
       },
       flush: () => {
         flushed = true;
         if (fastSession.flush) fastSession.flush();
-        if (accurateSession.flush) accurateSession.flush();
+        if (accurateSession && accurateSession.flush) accurateSession.flush();
       },
       endSegment: async () => {
         // A mid-recording VAD tick: everything is display-only until stop.
         if (!flushed) return '';
+        if (!accurateSession) {
+          const only = fastText();
+          fastCommitted = '';
+          fastInterim = '';
+          flushed = false;
+          return only;
+        }
         const started = Date.now();
         const settled = accurateSession.endSegment().then((t) => {
           accurateDone = true;
@@ -95,6 +115,15 @@ class HybridProvider {
         log(
           `commit from ${accurate ? 'accurate' : 'fast'} engine after ${Date.now() - started}ms`
         );
+        if (accurate) {
+          this.consecutiveFailures = 0;
+        } else if (++this.consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
+          this.accurateDropped = true;
+          log(
+            `accurate engine dropped after ${this.consecutiveFailures} failures in a row - ` +
+              'the fast engine commits alone until the server restarts'
+          );
+        }
         fastCommitted = '';
         fastInterim = '';
         flushed = false;
@@ -103,7 +132,7 @@ class HybridProvider {
         return text;
       },
       close: async () => {
-        await Promise.all([fastSession.close(), accurateSession.close()]);
+        await Promise.all([fastSession.close(), accurateSession ? accurateSession.close() : null]);
       }
     };
   }

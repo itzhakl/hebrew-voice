@@ -262,8 +262,8 @@ function testConfig() {
   // halves it never described, so the halves come from the defaults.
   config.save({ provider: 'hybrid', model: 'long', location: 'eu' }, file);
   const migrated = config.load({}, {}, file);
-  eq(migrated.hybrid.fast, 'elevenlabs', 'the undescribed fast half falls back');
-  eq(migrated.model, 'scribe_v2_realtime', 'the retired model is replaced');
+  eq(migrated.hybrid.fast, 'gemini', 'the undescribed fast half falls back');
+  eq(migrated.model, 'gemini-3.5-transcribe-live', 'the retired Chirp model is replaced');
   config.save({ provider: 'chirp' }, file);
   eq(config.load({}, {}, file).provider, 'elevenlabs', 'a retired provider is replaced');
 
@@ -1145,6 +1145,27 @@ async function testHybridPairing() {
   a3.sessions[0].cb.onError({ message: 'quota' });
   third.flush();
   eq(await third.endSegment(), 'טקסט מהיר', 'a failed accurate engine does not blank the segment');
+
+  // An engine that fails every time must stop being waited for, or every
+  // commit pays its deadline for nothing.
+  const f4 = fakeStreamingProvider('fast');
+  const a4 = fakeStreamingProvider('accurate');
+  const pair = new HybridProvider(f4, a4, { finalWaitMs: 50 });
+  for (let i = 0; i < 3; i++) {
+    const s = await pair.createSession({ onInterim: () => {}, onError: () => {} });
+    f4.sessions[i].cb.onFinal('טקסט מהיר');
+    a4.sessions[i].cb.onError({ message: 'quota' });
+    s.flush();
+    eq(await s.endSegment(), 'טקסט מהיר', `failure ${i + 1} still commits the fast text`);
+  }
+  ok(pair.accurateDropped, 'three failures in a row drop the accurate engine');
+  const after = await pair.createSession({ onInterim: () => {}, onError: () => {} });
+  eq(a4.sessions.length, 3, 'a dropped engine is not opened again');
+  f4.sessions[3].cb.onFinal('אחרי הנפילה');
+  after.flush();
+  const solo = Date.now();
+  eq(await after.endSegment(), 'אחרי הנפילה', 'the fast engine commits alone');
+  ok(Date.now() - solo < 40, 'and commits without waiting out a deadline');
 }
 
 async function testTranscribeBatch() {
@@ -1188,9 +1209,11 @@ async function testTranscribeBatch() {
 
 function testHybridConfig() {
   const cfg = config.load({ provider: 'hybrid', credential: 'sk_test', geminiCredential: 'AIzaTest' }, {}, '/nonexistent');
-  eq(cfg.hybrid.fast, 'elevenlabs', 'the fast half defaults to the lowest time to first ink');
+  // Both halves default to one vendor: a pair that quietly reaches for a
+  // second vendor's key is not what "switch to Gemini" asked for.
+  eq(cfg.hybrid.fast, 'gemini', 'the fast half defaults to the live Gemini model');
   eq(cfg.hybrid.accurate, 'gemini-transcribe', 'the accurate half defaults to the batch model');
-  eq(cfg.model, 'scribe_v2_realtime', 'model still names the streaming half');
+  eq(cfg.model, 'gemini-3.5-transcribe-live', 'model names the streaming half');
   eq(cli.buildProvider(cfg).id, 'hybrid', 'the hybrid provider is built');
 
   const geminiFast = config.load(

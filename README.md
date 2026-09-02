@@ -33,7 +33,7 @@ instead — a dictation is never lost to the slower engine.
 ```json
 {
   "provider": "hybrid",
-  "hybrid": { "fast": "elevenlabs", "accurate": "gemini-transcribe" }
+  "hybrid": { "fast": "gemini", "accurate": "gemini-transcribe" }
 }
 ```
 
