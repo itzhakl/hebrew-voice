@@ -1184,9 +1184,15 @@ async function testTranscribeBatch() {
   eq(await session.endSegment(), 'שלום עולם', 'the batch model answers once, at the end');
   eq(posted.length, 1, 'the whole utterance goes up in one request');
   const audio = posted[0].input[0];
-  eq(audio.mime_type, 'audio/l16', 'headerless PCM is declared as l16');
-  eq(audio.sample_rate, 16000, 'the rate is declared, since l16 carries no header');
-  eq(Buffer.from(audio.data, 'base64').length, 960, 'both frames ride the request');
+  // Measured: l16 with sample_rate/channels is rejected; the same PCM behind a
+  // WAV header returns 200.
+  eq(audio.mime_type, 'audio/wav', 'the PCM travels behind a WAV header');
+  eq(audio.sample_rate, undefined, 'rate and channels are rejected for non-l16 audio');
+  const wav = Buffer.from(audio.data, 'base64');
+  eq(wav.length, 44 + 960, 'both frames ride the request, behind a 44-byte header');
+  eq(wav.toString('ascii', 0, 4), 'RIFF', 'it is a RIFF file');
+  eq(wav.readUInt32LE(24), 16000, 'the header carries the sample rate');
+  eq(wav.readUInt32LE(40), 960, 'the data chunk names the payload length');
   const tc = posted[0].generation_config.transcription_config;
   eq(tc.language_codes.join(','), 'he-IL,en-US', 'languages carry a region');
   eq(tc.mode, 'verbatim', 'dictation returns what was said by default');

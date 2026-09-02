@@ -9,7 +9,7 @@
  * hybrid, where the live engine paints and this one commits.
  *
  * Wire reference: POST https://generativelanguage.googleapis.com/v1beta/interactions
- * body -> {model, input:[{type:'audio',data,mime_type:'audio/l16',sample_rate,channels}],
+ * body -> {model, input:[{type:'audio',data,mime_type:'audio/wav'}],
  *          generation_config:{transcription_config:{language_codes,custom_vocabulary,mode}}}
  * reply -> {output_text} | {steps:[{content:[{type:'text',text}]}]} | {error:{…}}
  */
@@ -19,9 +19,37 @@ const { parseGeminiCredential, mapGeminiError, languageCodes, vocabularyList, SA
 const DEFAULT_ENDPOINT = 'https://generativelanguage.googleapis.com/v1beta/interactions';
 const DEFAULT_MODEL = 'gemini-3.5-transcribe';
 
-/* Headerless PCM, so the rate and channel count have to be declared - a WAV
- * header would be the only alternative and this saves building one. */
-const MIME_TYPE = 'audio/l16';
+/* Measured against the live API, not read off the docs: `audio/l16` with
+ * `sample_rate`/`channels` beside it is rejected with a generic
+ * "Request contains an invalid argument", while the same PCM behind a 44-byte
+ * WAV header returns 200. The rate and channel count then travel in the
+ * header, and sending them as fields as well is rejected in turn ("Rate and
+ * channels are only supported for TYPE_L16 audio"). */
+const MIME_TYPE = 'audio/wav';
+
+const WAV_HEADER_BYTES = 44;
+
+function wavHeader(byteLength) {
+  const h = Buffer.alloc(WAV_HEADER_BYTES);
+  h.write('RIFF', 0);
+  h.writeUInt32LE(36 + byteLength, 4);
+  h.write('WAVE', 8);
+  h.write('fmt ', 12);
+  h.writeUInt32LE(16, 16);
+  h.writeUInt16LE(1, 20);
+  h.writeUInt16LE(1, 22);
+  h.writeUInt32LE(SAMPLE_RATE, 24);
+  h.writeUInt32LE(SAMPLE_RATE * 2, 28);
+  h.writeUInt16LE(2, 32);
+  h.writeUInt16LE(16, 34);
+  h.write('data', 36);
+  h.writeUInt32LE(byteLength, 40);
+  return h;
+}
+
+function toWav(pcm) {
+  return Buffer.concat([wavHeader(pcm.length), pcm]);
+}
 
 /* An utterance of dictation is seconds long; anything past this is a runaway
  * segment and posting it would cost more than dropping it. */
@@ -54,15 +82,7 @@ function buildBody(opts, audio) {
   if (vocabulary.length) transcription.custom_vocabulary = vocabulary;
   return {
     model: opts.model || DEFAULT_MODEL,
-    input: [
-      {
-        type: 'audio',
-        data: audio.toString('base64'),
-        mime_type: MIME_TYPE,
-        sample_rate: SAMPLE_RATE,
-        channels: 1
-      }
-    ],
+    input: [{ type: 'audio', data: toWav(audio).toString('base64'), mime_type: MIME_TYPE }],
     generation_config: { transcription_config: transcription }
   };
 }
@@ -147,6 +167,7 @@ class GeminiTranscribeProvider {
 
 module.exports = {
   GeminiTranscribeProvider,
+  toWav,
   buildBody,
   readTranscript,
   DEFAULT_MODEL,
