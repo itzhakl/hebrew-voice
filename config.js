@@ -6,8 +6,12 @@ const path = require('path');
 
 const { DEFAULT_MODEL, DEFAULT_BASE_URL, toList } = require('./elevenlabs');
 const { DEFAULT_MODEL: DEFAULT_WHISPER_MODEL } = require('./whisper');
+const {
+  DEFAULT_MODEL: DEFAULT_GEMINI_MODEL,
+  DEFAULT_BASE_URL: DEFAULT_GEMINI_BASE_URL
+} = require('./gemini');
 
-const PROVIDERS = new Set(['elevenlabs', 'whisper']);
+const PROVIDERS = new Set(['elevenlabs', 'whisper', 'gemini']);
 
 /* The local engine's knobs live in their own object: none of them mean
  * anything to Scribe, and a flat namespace would make "model" ambiguous. */
@@ -54,6 +58,9 @@ const DEFAULTS = {
   enabled: true,
   provider: 'elevenlabs',
   whisper: WHISPER_DEFAULTS,
+  // The Gemini Live API takes its own "AIza…" key, so it cannot share the
+  // single `credential` slot with Scribe.
+  geminiCredential: '',
   language: 'he',
   model: DEFAULT_MODEL,
   baseUrl: DEFAULT_BASE_URL,
@@ -114,6 +121,18 @@ function resolveCredential(fileCfg, env) {
   return String(fileCfg.credential || '').trim();
 }
 
+/* GEMINI_API_KEY is what Google's own tooling exports; GOOGLE_API_KEY is the
+ * older spelling the SDKs still read. A key pasted into the shared
+ * `credential` slot is accepted too - "AIza…" cannot be a Scribe key. */
+function resolveGeminiCredential(fileCfg, env) {
+  const inline = (env.GEMINI_API_KEY || env.GOOGLE_API_KEY || '').trim();
+  if (inline) return inline;
+  const stored = String(fileCfg.geminiCredential || '').trim();
+  if (stored) return stored;
+  const shared = String(fileCfg.credential || '').trim();
+  return /^AIza/.test(shared) ? shared : '';
+}
+
 function num(value, fallback) {
   const n = Number(value);
   return Number.isFinite(n) ? n : fallback;
@@ -127,7 +146,8 @@ function bool(value) {
 function load(overrides = {}, env = process.env, file = configPath()) {
   const fileCfg = readFileConfig(file);
   const cfg = Object.assign({}, DEFAULTS, fileCfg, {
-    credential: resolveCredential(fileCfg, env)
+    credential: resolveCredential(fileCfg, env),
+    geminiCredential: resolveGeminiCredential(fileCfg, env)
   });
   if (env.RTL_VOICE_PORT) cfg.port = num(env.RTL_VOICE_PORT, cfg.port);
   if (env.RTL_VOICE_LANGUAGE) cfg.language = env.RTL_VOICE_LANGUAGE;
@@ -145,6 +165,12 @@ function load(overrides = {}, env = process.env, file = configPath()) {
   // names its own under `whisper.model`.
   if (cfg.provider === 'elevenlabs' && !/^scribe/.test(String(cfg.model || ''))) {
     cfg.model = DEFAULTS.model;
+  }
+  // Same trap the other way round: a Scribe id left in `model` from before the
+  // switch would be sent to the Live API as a model path.
+  if (cfg.provider === 'gemini') {
+    if (!/^gemini/.test(String(cfg.model || ''))) cfg.model = DEFAULT_GEMINI_MODEL;
+    if (!/generativelanguage/.test(String(cfg.baseUrl || ''))) cfg.baseUrl = DEFAULT_GEMINI_BASE_URL;
   }
   cfg.whisper = normalizeWhisper(cfg.whisper);
   if (cfg.commitStrategy !== 'manual') cfg.commitStrategy = 'vad';
@@ -217,5 +243,6 @@ module.exports = {
   configDir,
   readFileConfig,
   resolveCredential,
+  resolveGeminiCredential,
   normalizeWhisper
 };

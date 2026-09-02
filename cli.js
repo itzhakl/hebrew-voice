@@ -13,6 +13,7 @@ const {
   MAX_KEYTERM_LENGTH
 } = require('./elevenlabs');
 const { WhisperProvider, venvPython, resolvePython } = require('./whisper');
+const { GeminiProvider, parseGeminiCredential } = require('./gemini');
 const server = require('./server');
 
 const ENV_VAR = 'VOICE_STREAM_BASE_URL';
@@ -23,12 +24,13 @@ const USAGE = `hebrew-voice - Hebrew dictation for Claude Code's terminal /voice
   hebrew-voice serve             run the server in the foreground
   hebrew-voice status            report whether a server is reachable
   hebrew-voice env               print the export line for an existing server
-  hebrew-voice setup             store the ElevenLabs API key
+  hebrew-voice setup             store the API key for the chosen provider
   hebrew-voice test [seconds]    record from the microphone and transcribe
   hebrew-voice levels [seconds]  measure this microphone: room, speech, bar
 
   --port <n>       port to bind or probe (default 8765)
-  --provider <p>   elevenlabs (cloud Scribe) or whisper (local faster-whisper)
+  --provider <p>   gemini (Gemini 3.5 Transcribe Live), elevenlabs (Scribe),
+                   or whisper (local faster-whisper)
   --lang <code>    ISO-639-1 language, "he" for Hebrew
   --model <id>     Scribe model id (default scribe_v2_realtime)
   --secondary <c>  other languages in the same sentence (default "en")
@@ -74,6 +76,20 @@ function buildProvider(cfg, log) {
         log
       })
     );
+  }
+  if (cfg.provider === 'gemini') {
+    parseGeminiCredential(cfg.geminiCredential);
+    return new GeminiProvider({
+      credential: cfg.geminiCredential,
+      baseUrl: cfg.baseUrl,
+      model: cfg.model,
+      languageCode: cfg.language,
+      secondaryLanguages: cfg.secondaryLanguages,
+      keyterms: cfg.keyterms,
+      noVerbatim: cfg.noVerbatim,
+      settleTimeoutMs: cfg.settleTimeoutMs,
+      log
+    });
   }
   // Fail fast on a missing or wrong-vendor key instead of erroring on the
   // first mic press, when the failure is invisible behind Claude's UI.
@@ -224,7 +240,9 @@ async function cmdStatus(cfg) {
     console.log('credential not needed - whisper runs on this machine');
     console.log(`python     ${python}${python === venvPython() ? '' : '  (not the rtl-caret venv)'}`);
   } else {
-    console.log(`credential ${cfg.credential ? 'set' : 'MISSING - run: hebrew-voice setup'}`);
+    const key = cfg.provider === 'gemini' ? cfg.geminiCredential : cfg.credential;
+    const setupCmd = cfg.provider === 'gemini' ? 'hebrew-voice setup --provider gemini' : 'hebrew-voice setup';
+    console.log(`credential ${key ? 'set' : `MISSING - run: ${setupCmd}`}`);
   }
   console.log(`provider   ${cfg.provider} (${engineLabel(cfg)})`);
 
@@ -280,13 +298,17 @@ function readStdin() {
 }
 
 async function cmdSetup(overrides) {
-  console.error('Paste your ElevenLabs API key, then Ctrl-D:');
+  // The key is stored per vendor, so which one is being asked for has to be
+  // settled before the prompt: --provider, else whatever is configured.
+  const provider = overrides.provider || config.load({}).provider;
+  const gemini = provider === 'gemini';
+  console.error(`Paste your ${gemini ? 'Gemini' : 'ElevenLabs'} API key, then Ctrl-D:`);
   const credential = await readStdin();
   if (!credential) {
     console.error('nothing read - aborted');
     return 1;
   }
-  const patch = { credential };
+  const patch = gemini ? { geminiCredential: credential, provider } : { credential };
   if (overrides.language) patch.language = overrides.language;
   if (overrides.model) patch.model = overrides.model;
   if (overrides.secondaryLanguages) patch.secondaryLanguages = overrides.secondaryLanguages;
@@ -294,7 +316,8 @@ async function cmdSetup(overrides) {
   if (overrides.port) patch.port = overrides.port;
   const cfg = config.load(patch);
   // Reject the credential now, at the one moment the user is looking at it.
-  parseElevenLabsCredential(cfg.credential);
+  if (gemini) parseGeminiCredential(cfg.geminiCredential);
+  else parseElevenLabsCredential(cfg.credential);
   const file = config.save(patch);
   console.error(`saved to ${file} (mode 0600)`);
   return 0;
