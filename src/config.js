@@ -11,7 +11,22 @@ const {
   DEFAULT_BASE_URL: DEFAULT_GEMINI_BASE_URL
 } = require('./gemini');
 
-const PROVIDERS = new Set(['elevenlabs', 'whisper', 'gemini']);
+const { DEFAULT_MODEL: DEFAULT_TRANSCRIBE_MODEL } = require('./transcribe');
+
+const PROVIDERS = new Set(['elevenlabs', 'whisper', 'gemini', 'hybrid']);
+
+/* The halves of the pair. Only a streaming engine can paint, and only a
+ * batch engine is worth waiting for at the end. */
+const FAST_PROVIDERS = new Set(['gemini', 'elevenlabs', 'whisper']);
+const ACCURATE_PROVIDERS = new Set(['gemini-transcribe']);
+
+const HYBRID_DEFAULTS = {
+  fast: 'gemini',
+  accurate: 'gemini-transcribe',
+  accurateModel: DEFAULT_TRANSCRIBE_MODEL,
+  // null means "whatever fits inside settleTimeoutMs".
+  finalWaitMs: null
+};
 
 /* The local engine's knobs live in their own object: none of them mean
  * anything to Scribe, and a flat namespace would make "model" ambiguous. */
@@ -58,6 +73,7 @@ const DEFAULTS = {
   enabled: true,
   provider: 'elevenlabs',
   whisper: WHISPER_DEFAULTS,
+  hybrid: HYBRID_DEFAULTS,
   // The Gemini Live API takes its own "AIza…" key, so it cannot share the
   // single `credential` slot with Scribe.
   geminiCredential: '',
@@ -163,12 +179,16 @@ function load(overrides = {}, env = process.env, file = configPath()) {
   // time, so anything not a Scribe model falls back to the default. Only the
   // remote engine is checked: `model` names a Scribe id, and the local engine
   // names its own under `whisper.model`.
-  if (cfg.provider === 'elevenlabs' && !/^scribe/.test(String(cfg.model || ''))) {
+  cfg.hybrid = normalizeHybrid(cfg.hybrid);
+  // Under the pair, `model` still names the streaming half - the batch half
+  // carries its own id in `hybrid.accurateModel`.
+  const streaming = cfg.provider === 'hybrid' ? cfg.hybrid.fast : cfg.provider;
+  if (streaming === 'elevenlabs' && !/^scribe/.test(String(cfg.model || ''))) {
     cfg.model = DEFAULTS.model;
   }
   // Same trap the other way round: a Scribe id left in `model` from before the
   // switch would be sent to the Live API as a model path.
-  if (cfg.provider === 'gemini') {
+  if (streaming === 'gemini') {
     if (!/^gemini/.test(String(cfg.model || ''))) cfg.model = DEFAULT_GEMINI_MODEL;
     if (!/generativelanguage/.test(String(cfg.baseUrl || ''))) cfg.baseUrl = DEFAULT_GEMINI_BASE_URL;
   }
@@ -192,6 +212,15 @@ function load(overrides = {}, env = process.env, file = configPath()) {
 function oneOf(value, allowed, fallback) {
   const v = String(value || '').trim();
   return allowed.includes(v) ? v : fallback;
+}
+
+function normalizeHybrid(raw) {
+  const h = Object.assign({}, HYBRID_DEFAULTS, raw && typeof raw === 'object' ? raw : {});
+  h.fast = oneOf(h.fast, [...FAST_PROVIDERS], HYBRID_DEFAULTS.fast);
+  h.accurate = oneOf(h.accurate, [...ACCURATE_PROVIDERS], HYBRID_DEFAULTS.accurate);
+  h.accurateModel = String(h.accurateModel || '').trim() || HYBRID_DEFAULTS.accurateModel;
+  h.finalWaitMs = h.finalWaitMs == null ? null : Math.max(200, num(h.finalWaitMs, 2300));
+  return h;
 }
 
 /* A file config replaces the whole `whisper` object rather than merging into
@@ -236,6 +265,7 @@ function save(patch, file = configPath()) {
 module.exports = {
   DEFAULTS,
   WHISPER_DEFAULTS,
+  HYBRID_DEFAULTS,
   PROVIDERS,
   load,
   save,
@@ -244,5 +274,6 @@ module.exports = {
   readFileConfig,
   resolveCredential,
   resolveGeminiCredential,
-  normalizeWhisper
+  normalizeWhisper,
+  normalizeHybrid
 };

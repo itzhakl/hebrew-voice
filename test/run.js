@@ -29,6 +29,8 @@ const {
   languageCodes,
   DEFAULT_MODEL: DEFAULT_GEMINI_MODEL
 } = require('../src/gemini');
+const { HybridProvider } = require('../src/hybrid');
+const { GeminiTranscribeProvider, readTranscript } = require('../src/transcribe');
 const config = require('../src/config');
 const server = require('../src/server');
 const cli = require('../src/cli');
@@ -256,11 +258,14 @@ function testConfig() {
   eq(config.load({ vadNoiseRatio: 0.5 }, {}, file).vadNoiseRatio, 1.2, 'a ratio that cannot separate speech from the room is clamped');
 
   // A voice.json left over from the Google backend must not send "long" as a
-  // Scribe model_id, nor keep selecting an engine that is gone.
+  // Scribe model_id. "hybrid" names a pair again, but a Chirp-era one whose
+  // halves it never described, so the halves come from the defaults.
   config.save({ provider: 'hybrid', model: 'long', location: 'eu' }, file);
   const migrated = config.load({}, {}, file);
-  eq(migrated.provider, 'elevenlabs', 'the retired provider is replaced');
-  eq(migrated.model, 'scribe_v2_realtime', 'the retired model is replaced');
+  eq(migrated.hybrid.fast, 'gemini', 'the undescribed fast half falls back');
+  eq(migrated.model, 'gemini-3.5-transcribe-live', 'the retired Chirp model is replaced');
+  config.save({ provider: 'chirp' }, file);
+  eq(config.load({}, {}, file).provider, 'elevenlabs', 'a retired provider is replaced');
 
   // A hand-edited voice.json holds whatever the user typed.
   config.save({ secondaryLanguages: 'en, ar', keyterms: 'קלוד', noVerbatim: 'true', vadSilenceThresholdSecs: 9 }, file);
@@ -1060,6 +1065,168 @@ async function testGeminiSession() {
   eq(errors[0].hint, 'set-api-key', 'a protocol error frame reaches the user');
 }
 
+// ---------- hybrid: fast paints, accurate commits ----------
+
+function fakeStreamingProvider(id) {
+  const sessions = [];
+  return {
+    id,
+    sessions,
+    async createSession(cb) {
+      const session = {
+        cb,
+        audio: 0,
+        flushed: false,
+        sendAudio: (pcm) => {
+          session.audio += pcm.length;
+        },
+        flush: () => {
+          session.flushed = true;
+        },
+        endSegment: async () => session.pull || '',
+        close: async () => {
+          session.closed = true;
+        }
+      };
+      sessions.push(session);
+      return session;
+    }
+  };
+}
+
+async function testHybridPairing() {
+  const fast = fakeStreamingProvider('fast');
+  const accurate = fakeStreamingProvider('accurate');
+  const interims = [];
+  const session = await new HybridProvider(fast, accurate, { finalWaitMs: 200 }).createSession({
+    onInterim: (t) => interims.push(t),
+    onError: () => {}
+  });
+  const [fastSide, accurateSide] = [fast.sessions[0], accurate.sessions[0]];
+
+  session.sendAudio(Buffer.alloc(640));
+  eq(fastSide.audio, 640, 'the fast engine hears the microphone');
+  eq(accurateSide.audio, 640, 'the accurate engine hears the same microphone');
+
+  fastSide.cb.onInterim('שלום');
+  eq(interims[0], 'שלום', 'the fast engine paints');
+  // A fast final is still a hypothesis here: the accurate engine owns commits.
+  fastSide.cb.onFinal('שלום עולם');
+  eq(interims[1], 'שלום עולם', 'a fast final is demoted to interim');
+  eq(await session.endSegment(), '', 'a mid-recording tick commits nothing');
+
+  session.flush();
+  ok(fastSide.flushed && accurateSide.flushed, 'both engines are flushed on stop');
+  accurateSide.pull = 'שלום עולם, מה קורה';
+  eq(await session.endSegment(), 'שלום עולם, מה קורה', 'the accurate engine wins the commit');
+
+  // The whole point of the fallback: a dictation is never lost to the slower
+  // engine going quiet or failing.
+  const f2 = fakeStreamingProvider('fast');
+  const a2 = fakeStreamingProvider('accurate');
+  const second = await new HybridProvider(f2, a2, { finalWaitMs: 150 }).createSession({
+    onInterim: () => {},
+    onError: () => {}
+  });
+  f2.sessions[0].cb.onInterim('טקסט מהיר');
+  a2.sessions[0].endSegment = () => new Promise(() => {});
+  second.flush();
+  const waited = Date.now();
+  eq(await second.endSegment(), 'טקסט מהיר', 'a silent accurate engine falls back to the fast text');
+  ok(Date.now() - waited >= 140, 'the fallback waits out its deadline first');
+
+  const f3 = fakeStreamingProvider('fast');
+  const a3 = fakeStreamingProvider('accurate');
+  const third = await new HybridProvider(f3, a3, { finalWaitMs: 150 }).createSession({
+    onInterim: () => {},
+    onError: () => {}
+  });
+  f3.sessions[0].cb.onFinal('טקסט מהיר');
+  a3.sessions[0].cb.onError({ message: 'quota' });
+  third.flush();
+  eq(await third.endSegment(), 'טקסט מהיר', 'a failed accurate engine does not blank the segment');
+
+  // An engine that fails every time must stop being waited for, or every
+  // commit pays its deadline for nothing.
+  const f4 = fakeStreamingProvider('fast');
+  const a4 = fakeStreamingProvider('accurate');
+  const pair = new HybridProvider(f4, a4, { finalWaitMs: 50 });
+  for (let i = 0; i < 3; i++) {
+    const s = await pair.createSession({ onInterim: () => {}, onError: () => {} });
+    f4.sessions[i].cb.onFinal('טקסט מהיר');
+    a4.sessions[i].cb.onError({ message: 'quota' });
+    s.flush();
+    eq(await s.endSegment(), 'טקסט מהיר', `failure ${i + 1} still commits the fast text`);
+  }
+  ok(pair.accurateDropped, 'three failures in a row drop the accurate engine');
+  const after = await pair.createSession({ onInterim: () => {}, onError: () => {} });
+  eq(a4.sessions.length, 3, 'a dropped engine is not opened again');
+  f4.sessions[3].cb.onFinal('אחרי הנפילה');
+  after.flush();
+  const solo = Date.now();
+  eq(await after.endSegment(), 'אחרי הנפילה', 'the fast engine commits alone');
+  ok(Date.now() - solo < 40, 'and commits without waiting out a deadline');
+}
+
+async function testTranscribeBatch() {
+  const posted = [];
+  const provider = new GeminiTranscribeProvider(
+    { credential: 'AIzaTest', languageCode: 'he', secondaryLanguages: ['en'], keyterms: ['npm'] },
+    async (body) => {
+      posted.push(body);
+      return { output_text: 'שלום עולם' };
+    }
+  );
+  const session = await provider.createSession({ onInterim: () => {}, onError: () => {} });
+  session.sendAudio(Buffer.alloc(640));
+  session.sendAudio(Buffer.alloc(320));
+  session.flush();
+  eq(await session.endSegment(), 'שלום עולם', 'the batch model answers once, at the end');
+  eq(posted.length, 1, 'the whole utterance goes up in one request');
+  const audio = posted[0].input[0];
+  eq(audio.mime_type, 'audio/l16', 'headerless PCM is declared as l16');
+  eq(audio.sample_rate, 16000, 'the rate is declared, since l16 carries no header');
+  eq(Buffer.from(audio.data, 'base64').length, 960, 'both frames ride the request');
+  const tc = posted[0].generation_config.transcription_config;
+  eq(tc.language_codes.join(','), 'he-IL,en-US', 'languages carry a region');
+  eq(tc.mode, 'verbatim', 'dictation returns what was said by default');
+  eq(tc.custom_vocabulary.join(','), 'npm', 'keyterms bias the batch model too');
+
+  // The transcript has moved between output_text and the step list once
+  // already during the preview; both are read.
+  eq(readTranscript({ steps: [{ content: [{ type: 'text', text: 'מהצעדים' }] }] }), 'מהצעדים', 'the step list is read as a fallback');
+
+  const errors = [];
+  const failing = new GeminiTranscribeProvider({ credential: 'AIzaTest' }, async () => {
+    throw { message: 'quota', hint: 'quota' };
+  });
+  const bad = await failing.createSession({ onInterim: () => {}, onError: (e) => errors.push(e) });
+  bad.sendAudio(Buffer.alloc(640));
+  bad.flush();
+  eq(await bad.endSegment(), '', 'a failed request commits nothing of its own');
+  eq(errors[0].hint, 'quota', 'the failure is still reported');
+}
+
+function testHybridConfig() {
+  const cfg = config.load({ provider: 'hybrid', credential: 'sk_test', geminiCredential: 'AIzaTest' }, {}, '/nonexistent');
+  // Both halves default to one vendor: a pair that quietly reaches for a
+  // second vendor's key is not what "switch to Gemini" asked for.
+  eq(cfg.hybrid.fast, 'gemini', 'the fast half defaults to the live Gemini model');
+  eq(cfg.hybrid.accurate, 'gemini-transcribe', 'the accurate half defaults to the batch model');
+  eq(cfg.model, 'gemini-3.5-transcribe-live', 'model names the streaming half');
+  eq(cli.buildProvider(cfg).id, 'hybrid', 'the hybrid provider is built');
+
+  const geminiFast = config.load(
+    { provider: 'hybrid', hybrid: { fast: 'gemini' }, geminiCredential: 'AIzaTest', model: 'scribe_v2_realtime' },
+    {},
+    '/nonexistent'
+  );
+  eq(geminiFast.model, 'gemini-3.5-transcribe-live', 'a leftover Scribe id is replaced when the fast half is gemini');
+  // An accurate half that cannot stream would never commit anything.
+  eq(config.load({ provider: 'hybrid', hybrid: { accurate: 'whisper' } }, {}, '/nonexistent').hybrid.accurate,
+    'gemini-transcribe', 'a bogus accurate half falls back');
+}
+
 async function main() {
   testVad();
   testNoisyRoom();
@@ -1070,6 +1237,9 @@ async function main() {
   testProviderSelection();
   testWhisperConfig();
   testGeminiSetup();
+  testHybridConfig();
+  await testHybridPairing();
+  await testTranscribeBatch();
   await testGeminiSession();
   await testElevenLabsSession();
   await testSocketRoundTrip();
