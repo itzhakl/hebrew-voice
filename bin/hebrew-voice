@@ -1,0 +1,15 @@
+#!/usr/bin/env node
+'use strict';
+
+/* Hebrew dictation for Claude Code. Needs no install and no root: the CLI
+ * builds its dictation socket from VOICE_STREAM_BASE_URL, so nothing is
+ * patched and Claude's own microphone keeps recording.
+ *
+ *   hebrew-voice serve            run the local server (this is the service)
+ *   hebrew-voice -- claude        run a command pointed at it
+ *   hebrew-voice levels           record without transcribing, report the room
+ */
+
+require('../src/cli')
+  .run(process.argv.slice(2))
+  .then((code) => process.exit(code));
