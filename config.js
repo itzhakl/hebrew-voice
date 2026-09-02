@@ -47,7 +47,7 @@ const WHISPER_DEFAULTS = {
   // pays for it around the clock - swapped out, so the next press waits on
   // the disk anyway. Unloading after a quiet stretch trades that for a
   // reload the user asked for. 0 keeps the old always-resident behaviour.
-  idleUnloadMs: 600000
+  idleUnloadMs: 300000
 };
 
 const DEFAULTS = {

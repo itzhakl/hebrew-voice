@@ -145,7 +145,14 @@ class WhisperProvider {
       stdio: ['pipe', 'pipe', 'pipe'],
       env: Object.assign({}, process.env, {
         WHISPER_OPTS: JSON.stringify(this.sidecarOptions()),
-        PYTHONUNBUFFERED: '1'
+        PYTHONUNBUFFERED: '1',
+        // CTranslate2 links a fat binary whose kernels are otherwise all
+        // resident in host memory the moment the context comes up, most of
+        // them for cards this one is not. Lazy loading pages in the ones a
+        // decode actually reaches. Deferred work, not skipped work: a kernel
+        // is paged in the first time it is used, so this trades nothing the
+        // idle window is not already trading.
+        CUDA_MODULE_LOADING: process.env.CUDA_MODULE_LOADING || 'LAZY'
       })
     });
   }
@@ -369,7 +376,14 @@ class WhisperProvider {
   /* Loads the model before anyone speaks. A long-running server should pay the
    * load at startup, not on the first microphone press. */
   preload() {
-    return this._ensure();
+    // `_ensure()` cancels a pending unload, and a preload has no session to
+    // close - so without this the timer is never armed and a server that
+    // preloads at startup holds the model for its whole life, which is the
+    // one case the idle window exists for.
+    return this._ensure().then((v) => {
+      if (!this.session || this.session.closed) this._armIdle();
+      return v;
+    });
   }
 
   idleUnloadMs() {
