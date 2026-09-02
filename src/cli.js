@@ -14,6 +14,8 @@ const {
 } = require('./elevenlabs');
 const { WhisperProvider, venvPython, resolvePython } = require('./whisper');
 const { GeminiProvider, parseGeminiCredential } = require('./gemini');
+const { GeminiTranscribeProvider } = require('./transcribe');
+const { HybridProvider } = require('./hybrid');
 const server = require('./server');
 
 const ENV_VAR = 'VOICE_STREAM_BASE_URL';
@@ -29,7 +31,7 @@ const USAGE = `hebrew-voice - Hebrew dictation for Claude Code's terminal /voice
   hebrew-voice levels [seconds]  measure this microphone: room, speech, bar
 
   --port <n>       port to bind or probe (default 8765)
-  --provider <p>   gemini (Gemini 3.5 Transcribe Live), elevenlabs (Scribe),
+  --provider <p>   hybrid (fast paints, accurate commits), gemini, elevenlabs,
                    or whisper (local faster-whisper)
   --lang <code>    ISO-639-1 language, "he" for Hebrew
   --model <id>     Scribe model id (default scribe_v2_realtime)
@@ -66,8 +68,32 @@ function parse(argv) {
   return opts;
 }
 
-function buildProvider(cfg, log) {
-  if (cfg.provider === 'whisper') {
+function buildProvider(cfg, log, which) {
+  const provider = which || cfg.provider;
+  if (provider === 'hybrid') {
+    // The pair is only worth its second stream when the halves differ: the
+    // live model paints, the batch model reads the whole utterance back.
+    const fast = buildProvider(cfg, log, cfg.hybrid.fast);
+    const accurate = buildProvider(cfg, log, cfg.hybrid.accurate);
+    return new HybridProvider(fast, accurate, {
+      // Leave the server room to close the socket inside the same budget.
+      finalWaitMs: cfg.hybrid.finalWaitMs == null ? cfg.settleTimeoutMs - 300 : cfg.hybrid.finalWaitMs,
+      log
+    });
+  }
+  if (provider === 'gemini-transcribe') {
+    parseGeminiCredential(cfg.geminiCredential);
+    return new GeminiTranscribeProvider({
+      credential: cfg.geminiCredential,
+      model: cfg.hybrid.accurateModel,
+      languageCode: cfg.language,
+      secondaryLanguages: cfg.secondaryLanguages,
+      keyterms: cfg.keyterms,
+      noVerbatim: cfg.noVerbatim,
+      log
+    });
+  }
+  if (provider === 'whisper') {
     return new WhisperProvider(
       Object.assign({}, cfg.whisper, {
         languageCode: normalizeLanguage(cfg.language),
@@ -77,7 +103,7 @@ function buildProvider(cfg, log) {
       })
     );
   }
-  if (cfg.provider === 'gemini') {
+  if (provider === 'gemini') {
     parseGeminiCredential(cfg.geminiCredential);
     return new GeminiProvider({
       credential: cfg.geminiCredential,
@@ -111,6 +137,9 @@ function buildProvider(cfg, log) {
 }
 
 function engineLabel(cfg) {
+  if (cfg.provider === 'hybrid') {
+    return `${cfg.hybrid.fast} paints, ${cfg.hybrid.accurateModel} commits, ${normalizeLanguage(cfg.language)}`;
+  }
   if (cfg.provider === 'whisper') {
     return `${cfg.whisper.model} on ${cfg.whisper.device}, ${normalizeLanguage(cfg.language)}`;
   }
@@ -240,9 +269,15 @@ async function cmdStatus(cfg) {
     console.log('credential not needed - whisper runs on this machine');
     console.log(`python     ${python}${python === venvPython() ? '' : '  (not the rtl-caret venv)'}`);
   } else {
-    const key = cfg.provider === 'gemini' ? cfg.geminiCredential : cfg.credential;
-    const setupCmd = cfg.provider === 'gemini' ? 'hebrew-voice setup --provider gemini' : 'hebrew-voice setup';
-    console.log(`credential ${key ? 'set' : `MISSING - run: ${setupCmd}`}`);
+    // The pair needs both keys unless its fast half is the local engine.
+    const needsGemini = cfg.provider === 'gemini' || cfg.provider === 'hybrid';
+    const needsScribe = cfg.provider === 'elevenlabs' || (cfg.provider === 'hybrid' && cfg.hybrid.fast === 'elevenlabs');
+    if (needsGemini) {
+      console.log(`credential ${cfg.geminiCredential ? 'gemini set' : 'gemini MISSING - run: hebrew-voice setup --provider gemini'}`);
+    }
+    if (needsScribe) {
+      console.log(`credential ${cfg.credential ? 'elevenlabs set' : 'elevenlabs MISSING - run: hebrew-voice setup --provider elevenlabs'}`);
+    }
   }
   console.log(`provider   ${cfg.provider} (${engineLabel(cfg)})`);
 
